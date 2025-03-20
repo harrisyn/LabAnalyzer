@@ -1,0 +1,23 @@
+{
+    "port": 5000,
+    "app_name": "Lab Analyzer",
+    "instance_id": "XN-L-001",
+    "analyzer_type": "SYSMEX XN-L",
+    "protocol": "ASTM",
+    "auto_start": false,
+    "external_server": {
+        "enabled": true,
+        "url": "https://api.example.com/data",
+        "api_key": "4389834943",
+        "sync_frequency": "realtime",
+        "cron_schedule": "0 * * * *",
+        "scheduled_hour": "0",
+        "scheduled_minute": "0",
+        "cron_expression": "0 2 * * *",
+        "retry_interval": 60,
+        "endpoint_path": "/api/results",
+        "http_method": "POST",
+        "auth_method": "none",
+        "api_key_header": "X-API-Key"
+    }
+}
