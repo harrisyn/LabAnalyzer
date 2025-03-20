@@ -32,6 +32,38 @@ class ApplicationWindow:
         self.loop = loop
         
         self.root.title(self.config.get("app_name", "XN-L Interface"))
+        
+        # Set application icon using Windows-specific approach
+        try:
+            import os
+            import ctypes
+            import sys
+            from PIL import Image, ImageTk
+            
+            icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.ico")
+            
+            if os.path.exists(icon_path):
+                # Set the taskbar icon using Windows API
+                if sys.platform == 'win32':
+                    myappid = 'company.product.subproduct.version'  # arbitrary string
+                    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+                
+                # Set window icon
+                self.root.iconbitmap(default=icon_path)
+                
+                # Set taskbar icon using both methods
+                self.root.iconbitmap(icon_path)
+                self.root.wm_iconbitmap(icon_path)
+                
+                # Also try PhotoImage method
+                ico = Image.open(icon_path)
+                photo = ImageTk.PhotoImage(ico)
+                self.root.iconphoto(True, photo)
+                self._icon_photo = photo  # Keep reference
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to set application icon: {e}")
+            
         self.root.geometry("1200x800")
 
         # Create main container
