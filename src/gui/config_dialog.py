@@ -6,8 +6,12 @@ from tkinter import ttk
 from tkinter import messagebox
 import re
 from datetime import datetime
+from ..utils.analyzers import AnalyzerDefinitions
 
 class ConfigDialog(tk.Toplevel):
+    # Constants
+    COMBOBOX_SELECTED = "<<ComboboxSelected>>"
+    
     def __init__(self, parent, config, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
         self.config = config
@@ -20,9 +24,13 @@ class ConfigDialog(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
         
+        # Create main container
+        main_container = ttk.Frame(self)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
         # Create a notebook for tabbed interface
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.notebook = ttk.Notebook(main_container)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
         
         # Create tabs
         self.basic_tab = ttk.Frame(self.notebook)
@@ -36,8 +44,12 @@ class ConfigDialog(tk.Toplevel):
         self._create_basic_widgets()
         self._create_server_widgets()
         
-        # Create buttons at the bottom
-        self._create_buttons()
+        # Create buttons at the bottom - now in a separate frame below the main container
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        ttk.Button(button_frame, text="Save", command=self._save).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=self._cancel).pack(side=tk.RIGHT, padx=5)
         
         # Center the dialog
         self.update_idletasks()
@@ -69,65 +81,35 @@ class ConfigDialog(tk.Toplevel):
         
         # Application name
         ttk.Label(basic_frame, text="Application Name:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
-        self.app_name_var = tk.StringVar(value=self.config.get("app_name", "XN-L Interface"))
+        self.app_name_var = tk.StringVar(value=self.config.get("app_name", "Basic Analyzer"))
         app_name_entry = ttk.Entry(basic_frame, textvariable=self.app_name_var, width=30)
         app_name_entry.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
         
-        # Instance ID
-        ttk.Label(basic_frame, text="Instance ID:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
-        self.instance_id_var = tk.StringVar(value=self.config.get("instance_id", "XN-L-001"))
-        instance_id_entry = ttk.Entry(basic_frame, textvariable=self.instance_id_var, width=20)
-        instance_id_entry.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
-        
-        # Analyzer Type (UPDATED to include all supported analyzers)
+        # Analyzer Type
         ttk.Label(basic_frame, text="Analyzer Type:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=2)
-        self.analyzer_type_var = tk.StringVar(value=self.config.get("analyzer_type", "SYSMEX XN-L"))
+        self.analyzer_type_var = tk.StringVar(value=self.config.get("analyzer_type", AnalyzerDefinitions.SYSMEX_XN_L))
         analyzer_type_combo = ttk.Combobox(basic_frame, textvariable=self.analyzer_type_var, 
-                                      values=["SYSMEX XN-L", 
-                                              "Mindray BS-430", 
-                                              "HumaCount 5D", 
-                                              "RESPONSE 920",
-                                              "Roche Cobas",
-                                              "Siemens Dimension",
-                                              "Abbott ARCHITECT",
-                                              "VITROS"], width=20)
+                                         values=AnalyzerDefinitions.get_supported_analyzers(), width=20)
         analyzer_type_combo.grid(row=3, column=1, sticky=tk.W, padx=5, pady=2)
-        analyzer_type_combo.bind("<<ComboboxSelected>>", self._on_analyzer_type_changed)
+        analyzer_type_combo.bind(self.COMBOBOX_SELECTED, self._on_analyzer_type_changed)
         
-        # Protocol (UPDATED to include all protocols)
+        # Protocol
         ttk.Label(basic_frame, text="Protocol:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=2)
-        self.protocol_var = tk.StringVar(value=self.config.get("protocol", "ASTM"))
+        self.protocol_var = tk.StringVar(value=self.config.get("protocol", AnalyzerDefinitions.PROTOCOL_ASTM))
         protocol_combo = ttk.Combobox(basic_frame, textvariable=self.protocol_var, 
-                                 values=["ASTM", "HL7", "LIS", "RESPONSE", "POCT1A"], width=10)
+                                    values=AnalyzerDefinitions.get_supported_protocols(), width=20)
         protocol_combo.grid(row=4, column=1, sticky=tk.W, padx=5, pady=2)
         
         # Auto-start option
         self.auto_start_var = tk.BooleanVar(value=self.config.get("auto_start", False))
-        auto_start_check = ttk.Checkbutton(basic_frame, text="Auto-start server on launch", variable=self.auto_start_var)
+        auto_start_check = ttk.Checkbutton(basic_frame, text="Auto-start server", variable=self.auto_start_var)
         auto_start_check.grid(row=5, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
         
     def _on_analyzer_type_changed(self, event):
         """Handle analyzer type selection change"""
         analyzer_type = self.analyzer_type_var.get()
+        self.protocol_var.set(AnalyzerDefinitions.get_protocol_for_analyzer(analyzer_type))
         
-        # Set protocol based on analyzer type
-        if analyzer_type == "SYSMEX XN-L":
-            self.protocol_var.set("ASTM")
-        elif analyzer_type == "Mindray BS-430":
-            self.protocol_var.set("HL7")
-        elif analyzer_type == "HumaCount 5D":
-            self.protocol_var.set("LIS")
-        elif analyzer_type == "RESPONSE 920":
-            self.protocol_var.set("RESPONSE")
-        elif analyzer_type == "Roche Cobas":
-            self.protocol_var.set("ASTM")
-        elif analyzer_type == "Siemens Dimension":
-            self.protocol_var.set("ASTM")
-        elif analyzer_type == "Abbott ARCHITECT":
-            self.protocol_var.set("POCT1A")
-        elif analyzer_type == "VITROS":
-            self.protocol_var.set("ASTM")
-            
     def _create_server_widgets(self):
         """Create server and sync settings widgets"""
         main_frame = ttk.Frame(self.server_tab, padding="10")
@@ -167,7 +149,7 @@ class ConfigDialog(tk.Toplevel):
         sync_freq_combo = ttk.Combobox(server_frame, textvariable=self.sync_freq_var, 
                                       values=["realtime", "scheduled", "cron"])
         sync_freq_combo.grid(row=4, column=1, sticky=tk.W, padx=5, pady=2)
-        sync_freq_combo.bind("<<ComboboxSelected>>", self._on_sync_freq_changed)
+        sync_freq_combo.bind(self.COMBOBOX_SELECTED, self._on_sync_freq_changed)
         
         # Create a new frame for additional sync settings
         self.sync_options_frame = ttk.LabelFrame(main_frame, text="Sync Options", padding="5")
@@ -221,7 +203,7 @@ class ConfigDialog(tk.Toplevel):
         auth_method_combo = ttk.Combobox(auth_frame, textvariable=self.auth_method_var, 
                                        values=["none", "api_key", "bearer_token", "basic_auth", "custom_header", "oauth2"], width=15)
         auth_method_combo.grid(row=0, column=1, sticky=tk.W, padx=5, pady=2)
-        auth_method_combo.bind("<<ComboboxSelected>>", self._on_auth_method_changed)
+        auth_method_combo.bind(self.COMBOBOX_SELECTED, self._on_auth_method_changed)
         
         # Authentication details frame
         self.auth_details_frame = ttk.LabelFrame(main_frame, text="Authentication Details", padding="5")
@@ -298,14 +280,6 @@ class ConfigDialog(tk.Toplevel):
         self.scope_entry = ttk.Entry(self.auth_details_frame, textvariable=self.scope_var, width=30)
         self.scope_entry.grid(row=10, column=1, sticky=tk.W, padx=5, pady=2)
 
-    def _create_buttons(self):
-        """Create save/cancel buttons"""
-        button_frame = ttk.Frame(self)
-        button_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        ttk.Button(button_frame, text="Save", command=self._save).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(button_frame, text="Cancel", command=self._cancel).pack(side=tk.RIGHT, padx=5)
-        
     def _on_sync_freq_changed(self, event):
         """Handle sync frequency selection change"""
         self._update_sync_options()
@@ -382,72 +356,99 @@ class ConfigDialog(tk.Toplevel):
             
     def _validate_cron_expression(self, cron_expr):
         """Basic validation for cron expressions"""
-        # Simple regex pattern for basic cron format validation
-        pattern = r'^(\*|[0-9,-\/]+)\s+(\*|[0-9,-\/]+)\s+(\*|[0-9,-\/]+)\s+(\*|[0-9,-\/]+)\s+(\*|[0-9,-\/]+)$'
-        return bool(re.match(pattern, cron_expr))
+        parts = cron_expr.split()
+        if len(parts) != 5:
+            return False
             
+        for part in parts:
+            # Check if part is either * or contains valid numbers
+            if part != '*' and not all(c in '0123456789,-/' for c in part):
+                return False
+        return True
+
+    def _validate_sync_settings(self):
+        """Validate sync-related settings"""
+        sync_freq = self.sync_freq_var.get()
+        
+        if sync_freq == "scheduled":
+            hour = int(self.hour_var.get())
+            minute = int(self.minute_var.get())
+            
+            if not (0 <= hour <= 23):
+                raise ValueError("Hour must be between 0 and 23")
+                
+            if not (0 <= minute <= 59):
+                raise ValueError("Minute must be between 0 and 59")
+                
+        elif sync_freq == "cron":
+            if not self._validate_cron_expression(self.cron_var.get()):
+                raise ValueError("Invalid cron expression format")
+        
+        retry_interval = int(self.retry_interval_var.get())
+        if retry_interval < 10:
+            raise ValueError("Retry interval must be at least 10 seconds")
+
+    def _get_auth_config(self):
+        """Get authentication configuration based on selected method"""
+        auth_method = self.auth_method_var.get()
+        config = {"auth_method": auth_method}
+        
+        if auth_method == "api_key":
+            config.update({
+                "api_key": self.api_key_var.get(),
+                "api_key_header": self.api_key_header_var.get()
+            })
+        elif auth_method == "bearer_token":
+            config.update({
+                "bearer_token": self.bearer_token_var.get()
+            })
+        elif auth_method == "basic_auth":
+            config.update({
+                "username": self.username_var.get(),
+                "password": self.password_var.get()
+            })
+        elif auth_method == "custom_header":
+            config.update({
+                "custom_header_name": self.custom_header_name_var.get(),
+                "custom_header_value": self.custom_header_value_var.get()
+            })
+        elif auth_method == "oauth2":
+            if not self.oauth2_token_url_var.get():
+                raise ValueError("Token URL is required for OAuth2 authentication")
+                
+            config.update({
+                "oauth2_token_url": self.oauth2_token_url_var.get(),
+                "client_id": self.client_id_var.get(),
+                "client_secret": self.client_secret_var.get(),
+                "scope": self.scope_var.get()
+            })
+            
+        return config
+
     def _save(self):
         """Save the configuration"""
         try:
-            # Validate port
-            port = int(self.port_var.get())
-            if not (1024 <= port <= 65535):
-                raise ValueError("Port must be between 1024 and 65535")
-                
-            # Validate analyzer type and protocol combination
+            # Basic validation
             analyzer_type = self.analyzer_type_var.get()
             protocol = self.protocol_var.get()
+            port = int(self.port_var.get())
             
-            # Ensure compatible combinations
-            valid_combinations = {
-                "SYSMEX XN-L": ["ASTM"],
-                "Mindray BS-430": ["HL7"],
-                "HumaCount 5D": ["LIS"],
-                "RESPONSE 920": ["RESPONSE"],
-                "Roche Cobas": ["ASTM"],
-                "Siemens Dimension": ["ASTM"],
-                "Abbott ARCHITECT": ["POCT1A"],
-                "VITROS": ["ASTM"]
-            }
-            
-            if analyzer_type in valid_combinations and protocol not in valid_combinations[analyzer_type]:
+            # Verify analyzer and protocol compatibility
+            correct_protocol = AnalyzerDefinitions.get_protocol_for_analyzer(analyzer_type)
+            if protocol != correct_protocol:
                 messagebox.showwarning(
                     "Configuration Warning", 
-                    f"{analyzer_type} typically uses {valid_combinations[analyzer_type][0]} protocol. " +
+                    f"{analyzer_type} typically uses {correct_protocol} protocol. " +
                     "Your selection may not work correctly."
                 )
-                
-            # Validate sync frequency specific settings
-            sync_freq = self.sync_freq_var.get()
             
-            if sync_freq == "scheduled":
-                # Validate hour and minute
-                hour = int(self.hour_var.get())
-                minute = int(self.minute_var.get())
-                
-                if not (0 <= hour <= 23):
-                    raise ValueError("Hour must be between 0 and 23")
-                    
-                if not (0 <= minute <= 59):
-                    raise ValueError("Minute must be between 0 and 59")
-                    
-            elif sync_freq == "cron":
-                # Validate cron expression
-                if not self._validate_cron_expression(self.cron_var.get()):
-                    raise ValueError("Invalid cron expression format")
-                
-            # Validate retry interval
-            retry_interval = int(self.retry_interval_var.get())
-            if retry_interval < 10:
-                raise ValueError("Retry interval must be at least 10 seconds")
+            # Validate sync settings
+            self._validate_sync_settings()
             
-            # Validate authentication method specific settings
-            auth_method = self.auth_method_var.get()
+            # Get authentication config
+            auth_config = self._get_auth_config()
             
-            if auth_method == "oauth2" and not self.oauth2_token_url_var.get():
-                raise ValueError("Token URL is required for OAuth2 authentication")
-            
-            # Prepare external server config with common settings
+            # Prepare external server config
             external_server_config = {
                 "enabled": self.sync_enabled_var.get(),
                 "url": self.server_url_var.get(),
@@ -457,43 +458,14 @@ class ConfigDialog(tk.Toplevel):
                 "scheduled_hour": self.hour_var.get(),
                 "scheduled_minute": self.minute_var.get(),
                 "cron_expression": self.cron_var.get(),
-                "retry_interval": retry_interval,
-                "auth_method": auth_method
+                "retry_interval": int(self.retry_interval_var.get()),
+                **auth_config
             }
-            
-            # Add authentication specific settings based on method
-            if auth_method == "api_key":
-                external_server_config.update({
-                    "api_key": self.api_key_var.get(),
-                    "api_key_header": self.api_key_header_var.get()
-                })
-            elif auth_method == "bearer_token":
-                external_server_config.update({
-                    "bearer_token": self.bearer_token_var.get()
-                })
-            elif auth_method == "basic_auth":
-                external_server_config.update({
-                    "username": self.username_var.get(),
-                    "password": self.password_var.get()
-                })
-            elif auth_method == "custom_header":
-                external_server_config.update({
-                    "custom_header_name": self.custom_header_name_var.get(),
-                    "custom_header_value": self.custom_header_value_var.get()
-                })
-            elif auth_method == "oauth2":
-                external_server_config.update({
-                    "oauth2_token_url": self.oauth2_token_url_var.get(),
-                    "client_id": self.client_id_var.get(),
-                    "client_secret": self.client_secret_var.get(),
-                    "scope": self.scope_var.get()
-                })
                 
             # Update configuration
             self.config.update(
                 port=port,
                 app_name=self.app_name_var.get(),
-                instance_id=self.instance_id_var.get(),
                 analyzer_type=analyzer_type,
                 protocol=protocol,
                 auto_start=self.auto_start_var.get(),
@@ -507,7 +479,7 @@ class ConfigDialog(tk.Toplevel):
             messagebox.showerror("Invalid Input", str(e))
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save configuration: {str(e)}")
-            
+
     def _cancel(self):
         """Cancel the dialog"""
         self.result = False

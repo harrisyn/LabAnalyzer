@@ -31,7 +31,7 @@ class ApplicationWindow:
         self.logger = logger
         self.loop = loop
         
-        self.root.title(self.config.get("app_name", "XN-L Interface"))
+        self.root.title(self.config.get("app_name", "LabSync"))
         
         # Set application icon using Windows-specific approach
         try:
@@ -154,7 +154,7 @@ class ApplicationWindow:
         
         if dialog.result:
             # Update window title
-            self.root.title(self.config.get("app_name", "XN-L Interface"))
+            self.root.title(self.config.get("app_name", "LabSync"))
             
             # If server is running, show restart message
             if self.start_button['state'] == tk.DISABLED:

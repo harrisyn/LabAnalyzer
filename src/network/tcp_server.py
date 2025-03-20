@@ -11,6 +11,7 @@ import errno
 import queue
 from datetime import datetime
 from tkinter import NORMAL, DISABLED
+from ..utils.analyzers import AnalyzerDefinitions
 from ..protocols.astm_parser import ASTMParser
 from ..protocols.hl7_parser import HL7Parser
 from ..protocols.lis_parser import LISParser
@@ -30,6 +31,18 @@ class TCPServer:
     NAK = b'\x15'  # Negative Acknowledge
     EOT = b'\x04'  # End of Transmission
     
+    # Parser mappings using AnalyzerDefinitions constants
+    PARSER_MAP = {
+        (AnalyzerDefinitions.MINDRAY_BS_430, AnalyzerDefinitions.PROTOCOL_HL7): HL7Parser,
+        (AnalyzerDefinitions.HUMACOUNT_5D, AnalyzerDefinitions.PROTOCOL_LIS): LISParser,
+        (AnalyzerDefinitions.RESPONSE_920, AnalyzerDefinitions.PROTOCOL_RESPONSE): ResponseParser,
+        (AnalyzerDefinitions.ROCHE_COBAS, AnalyzerDefinitions.PROTOCOL_ASTM): CobasParser,
+        (AnalyzerDefinitions.SIEMENS_DIMENSION, AnalyzerDefinitions.PROTOCOL_ASTM): DimensionParser,
+        (AnalyzerDefinitions.ABBOTT_ARCHITECT, AnalyzerDefinitions.PROTOCOL_POCT1A): AbbottParser,
+        (AnalyzerDefinitions.VITROS, AnalyzerDefinitions.PROTOCOL_ASTM): VitrosParser,
+        (AnalyzerDefinitions.BECKMAN_AU, AnalyzerDefinitions.PROTOCOL_ASTM): BeckmanParser
+    }
+
     def __init__(self, config, db_manager, logger=None, gui_callback=None, sync_manager=None):
         """Initialize the TCP server"""
         self.config = config
@@ -39,9 +52,9 @@ class TCPServer:
         self.gui_queue = queue.Queue()
         self._gui_worker_scheduled = False
         
-        # Get analyzer type and protocol from config
-        analyzer_type = self.config.get("analyzer_type", "SYSMEX XN-L")
-        protocol = self.config.get("protocol", "ASTM").upper()
+        # Get analyzer type and protocol from config, using defaults from AnalyzerDefinitions
+        analyzer_type = self.config.get("analyzer_type", AnalyzerDefinitions.SYSMEX_XN_L)
+        protocol = self.config.get("protocol", AnalyzerDefinitions.get_protocol_for_analyzer(analyzer_type))
         
         self.log_message(f"Initializing server for analyzer: {analyzer_type} with protocol: {protocol}")
         
@@ -58,18 +71,6 @@ class TCPServer:
         self.is_running = False
         self.server_thread = None
         self.sock = None
-
-    # Parser mappings
-    PARSER_MAP = {
-        ("Mindray BS-430", "HL7"): HL7Parser,
-        ("HumaCount 5D", "LIS"): LISParser,
-        ("RESPONSE 920", "RESPONSE"): ResponseParser,
-        ("Roche Cobas", "ASTM"): CobasParser,
-        ("Siemens Dimension", "ASTM"): DimensionParser,
-        ("Abbott ARCHITECT", "POCT1A"): AbbottParser,
-        ("VITROS", "ASTM"): VitrosParser,
-        ("Beckman AU", "ASTM"): BeckmanParser
-    }
 
     def _create_parser(self, analyzer_type, protocol, db_manager, logger, gui_callback):
         """Create appropriate parser based on analyzer type and protocol"""

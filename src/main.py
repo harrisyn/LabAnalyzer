@@ -34,7 +34,7 @@ async def setup_application():
     
     try:
         config = Config()
-        logger = Logger(name=config.get("app_name", "XN-L Interface"))
+        logger = Logger(name=config.get("app_name", "LabSync"))
         db_manager = DatabaseManager()
         
         # Create Tkinter root window

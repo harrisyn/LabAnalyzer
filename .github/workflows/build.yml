@@ -25,8 +25,7 @@ jobs:
           
       - name: Build Windows executable
         run: |
-          # Remove --icon parameter since we'll bundle it with --add-data
-          pyinstaller --name labSync --windowed --onefile --add-data "src/gui/resources;gui/resources" src/main.py
+          pyinstaller --name "LabSync" --windowed --onefile --add-data "src/gui/resources;gui/resources" src/main.py
           
       - name: Create Windows Installer
         run: |
@@ -59,17 +58,16 @@ jobs:
         run: |
           mkdir icon.iconset
           # Using png file instead of ico for Mac conversion
-          sips -s format png src/gui/resources/icon.ico --out icon.iconset/icon_512x512.png
+          sips -s format png src/gui/resources/icon.png --out icon.iconset/icon_512x512.png
           iconutil -c icns icon.iconset -o icon.icns
           
       - name: Build macOS app
         run: |
-          # Remove --icon parameter and bundle resources
-          pyinstaller --name labSync --windowed --onefile --add-data "src/gui/resources:gui/resources" src/main.py
+          pyinstaller --name "LabSync" --windowed --onefile --add-data "src/gui/resources:gui/resources" src/main.py
           
       - name: Create DMG
         run: |
-          hdiutil create -srcfolder "dist/labSync.app" -volname "Basic Analyzer" -fs HFS+ -format UDZO -size 100m "dist/LabSync.dmg"
+          hdiutil create -srcfolder "dist/LabSync.app" -volname "LabSync" -fs HFS+ -format UDZO -size 100m "dist/LabSync.dmg"
           
       - name: Upload macOS Artifact
         uses: actions/upload-artifact@v4

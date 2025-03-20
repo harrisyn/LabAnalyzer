@@ -31,13 +31,14 @@ class Config:
             return self._create_default_config()
     
     def _create_default_config(self):
-        """Create and save a default configuration"""
-        default_config = {
+        """Create a default configuration"""
+        return {
             "port": 5000,
-            "app_name": "XN-L Data Receiver",
-            "instance_id": "XN-L-001",
-            "analyzer_type": "SYSMEX XN-L",
+            "app_name": "LabSync",
+            "instance_id": "LABSYNC-001",
+            "analyzer_type": "SYSMEX XN-L",  # Keep this as it's the analyzer model name
             "protocol": "ASTM",
+            "auto_start": False,
             "external_server": {
                 "enabled": False,
                 "url": "https://api.example.com/data",
@@ -47,9 +48,6 @@ class Config:
                 "cron_schedule": "0 * * * *"
             }
         }
-        
-        self._save_config(default_config)
-        return default_config
     
     def _save_config(self, config=None):
         """Save configuration to file"""
