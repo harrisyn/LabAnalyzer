@@ -64,7 +64,7 @@ class ApplicationWindow:
         except Exception as e:
             self.logger.warning(f"Failed to set application icon: {e}")
             
-        self.root.geometry("1200x800")
+        self.root.geometry("900x600")
 
         # Create main container
         self.main_container = ttk.Frame(self.root)
@@ -198,17 +198,83 @@ class ApplicationWindow:
         self.patient_frame = ttk.Frame(self.main_container)
         self.patient_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # Create filter toggle frame
+        filter_toggle_frame = ttk.Frame(self.patient_frame)
+        filter_toggle_frame.pack(fill=tk.X, padx=5, pady=(0, 2))
+        
+        # Add filter toggle button
+        self.filter_visible = tk.BooleanVar(value=False)
+        self.toggle_button = ttk.Button(filter_toggle_frame, text="▼ Show Filters", command=self._toggle_filters)
+        self.toggle_button.pack(side=tk.LEFT)
+        
+        # Add filter frame
+        self.filter_frame = ttk.LabelFrame(self.patient_frame, text="Filters")
+        
+        # Date range filter
+        date_frame = ttk.Frame(self.filter_frame)
+        date_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(date_frame, text="Date Range:").pack(side=tk.LEFT, padx=(0, 5))
+        self.date_range_var = tk.StringVar(value="All")
+        date_range_combo = ttk.Combobox(date_frame, textvariable=self.date_range_var, 
+                                      values=["All", "Today", "Last 7 Days", "Last 30 Days", "Custom"], 
+                                      width=15)
+        date_range_combo.pack(side=tk.LEFT, padx=5)
+        date_range_combo.bind("<<ComboboxSelected>>", self._on_date_range_changed)
+        
+        # Custom date range inputs
+        self.custom_date_frame = ttk.Frame(date_frame)
+        ttk.Label(self.custom_date_frame, text="From:").pack(side=tk.LEFT, padx=5)
+        self.date_from_var = tk.StringVar()
+        self.date_from_entry = ttk.Entry(self.custom_date_frame, textvariable=self.date_from_var, width=10)
+        self.date_from_entry.pack(side=tk.LEFT, padx=2)
+        
+        ttk.Label(self.custom_date_frame, text="To:").pack(side=tk.LEFT, padx=5)
+        self.date_to_var = tk.StringVar()
+        self.date_to_entry = ttk.Entry(self.custom_date_frame, textvariable=self.date_to_var, width=10)
+        self.date_to_entry.pack(side=tk.LEFT, padx=2)
+        
+        # Status filter
+        status_frame = ttk.Frame(self.filter_frame)
+        status_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(status_frame, text="Sync Status:").pack(side=tk.LEFT, padx=(0, 5))
+        self.status_filter_var = tk.StringVar(value="Not Synced")  # Changed default to "Not Synced"
+        status_combo = ttk.Combobox(status_frame, textvariable=self.status_filter_var,
+                                  values=["All", "Synced", "Not Synced"], width=15)
+        status_combo.pack(side=tk.LEFT, padx=5)
+        status_combo.bind("<<ComboboxSelected>>", self._on_filter_changed)
+        
+        # Search frame
+        search_frame = ttk.Frame(self.filter_frame)
+        search_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 5))
+        self.search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=30)
+        search_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.search_var.trace_add("write", lambda *args: self._on_filter_changed())
+        
+        # Apply filter button
+        ttk.Button(self.filter_frame, text="Apply Filters", 
+                  command=self._on_filter_changed).pack(side=tk.RIGHT, padx=5, pady=5)
+        
+        # Hide filter frame initially
+        self.filter_frame.pack_forget()
+        
         # Setup patient treeview
         self.patient_tree = ttk.Treeview(self.patient_frame, 
                                        columns=("ID", "Name", self.COLUMN_SAMPLE_ID, "Sex", 
                                               "Date", self.COLUMN_SYNC_STATUS, "Actions"))
         self.patient_tree.heading("#0", text="")
-        self.patient_tree.heading("ID", text="Patient ID")
-        self.patient_tree.heading("Name", text="Name")
-        self.patient_tree.heading(self.COLUMN_SAMPLE_ID, text=self.COLUMN_SAMPLE_ID)
-        self.patient_tree.heading("Sex", text="Sex")
-        self.patient_tree.heading("Date", text="Date")
-        self.patient_tree.heading(self.COLUMN_SYNC_STATUS, text=self.COLUMN_SYNC_STATUS)
+        self.patient_tree.heading("ID", text="Patient ID", command=lambda: self._treeview_sort_column(self.patient_tree, "ID"))
+        self.patient_tree.heading("Name", text="Name", command=lambda: self._treeview_sort_column(self.patient_tree, "Name"))
+        self.patient_tree.heading(self.COLUMN_SAMPLE_ID, text=self.COLUMN_SAMPLE_ID, 
+                                command=lambda: self._treeview_sort_column(self.patient_tree, self.COLUMN_SAMPLE_ID))
+        self.patient_tree.heading("Sex", text="Sex", command=lambda: self._treeview_sort_column(self.patient_tree, "Sex"))
+        self.patient_tree.heading("Date", text="Date", command=lambda: self._treeview_sort_column(self.patient_tree, "Date"))
+        self.patient_tree.heading(self.COLUMN_SYNC_STATUS, text=self.COLUMN_SYNC_STATUS, 
+                                command=lambda: self._treeview_sort_column(self.patient_tree, self.COLUMN_SYNC_STATUS))
         self.patient_tree.heading("Actions", text="Actions")
         
         # Configure patient column widths
@@ -232,6 +298,17 @@ class ApplicationWindow:
         # Bind click event to patient tree for showing patient results and sync
         self.patient_tree.tag_bind("view_results", "<Button-1>", self._on_view_results_click)
         self.patient_tree.tag_bind("sync", "<Button-1>", self._on_sync_click)
+
+    def _toggle_filters(self):
+        """Toggle the visibility of the filter frame"""
+        if self.filter_visible.get():
+            self.filter_frame.pack_forget()
+            self.toggle_button.config(text="▼ Show Filters")
+            self.filter_visible.set(False)
+        else:
+            self.filter_frame.pack(fill=tk.X, padx=5, pady=(0, 5), after=self.toggle_button.winfo_parent())
+            self.toggle_button.config(text="▲ Hide Filters")
+            self.filter_visible.set(True)
 
     def _on_view_results_click(self, event):
         """Handle click on 'View Results' button in patient tree"""
@@ -307,16 +384,16 @@ class ApplicationWindow:
                 status_label = ttk.Label(sync_frame, text=f"Status: {sync_status}", style="Modern.TLabel")
                 status_label.pack(side=tk.RIGHT, padx=10)
         
-        # Create results treeview
+        # Create results treeview with sorting
         results_tree = ttk.Treeview(results_frame, style="Modern.Treeview",
                                    columns=("Test", "Value", "Unit", "Flags", "Time", "Status"))
-        results_tree.heading("#0", text="ID")
-        results_tree.heading("Test", text="Test")
-        results_tree.heading("Value", text="Value")
-        results_tree.heading("Unit", text="Unit")
-        results_tree.heading("Flags", text="Flags")
-        results_tree.heading("Time", text="Time")
-        results_tree.heading("Status", text="Status")
+        results_tree.heading("#0", text="ID", command=lambda: self._treeview_sort_column(results_tree, "#0", is_num=True))
+        results_tree.heading("Test", text="Test", command=lambda: self._treeview_sort_column(results_tree, "Test"))
+        results_tree.heading("Value", text="Value", command=lambda: self._treeview_sort_column(results_tree, "Value", is_num=True))
+        results_tree.heading("Unit", text="Unit", command=lambda: self._treeview_sort_column(results_tree, "Unit"))
+        results_tree.heading("Flags", text="Flags", command=lambda: self._treeview_sort_column(results_tree, "Flags"))
+        results_tree.heading("Time", text="Time", command=lambda: self._treeview_sort_column(results_tree, "Time"))
+        results_tree.heading("Status", text="Status", command=lambda: self._treeview_sort_column(results_tree, "Status"))
         
         # Configure column widths
         results_tree.column("#0", width=50)
@@ -1153,3 +1230,108 @@ class ApplicationWindow:
         self.server_status.config(text=self.STATUS_SERVER_FAILED)
         self.start_button.config(state=tk.NORMAL)
         self.log("Failed to auto-start server")
+
+    def _treeview_sort_column(self, tree, col, is_num=False, reverse=False):
+        """Sort treeview column when header is clicked."""
+        # Get all items in the tree
+        items = [(tree.set(item, col) if col != "#0" else tree.item(item)["text"], item) for item in tree.get_children("")]
+        
+        # Sort the items
+        items.sort(reverse=reverse, 
+                  key=lambda x: (float(x[0]) if is_num and x[0].replace('.','',1).isdigit() else x[0].lower()))
+        
+        # Rearrange items in sorted positions
+        for index, (_, item) in enumerate(items):
+            tree.move(item, "", index)
+        
+        # Reverse sort next time
+        tree.heading(col, command=lambda: self._treeview_sort_column(tree, col, is_num, not reverse))
+
+    def _on_date_range_changed(self, event=None):
+        """Handle date range selection change"""
+        if self.date_range_var.get() == "Custom":
+            self.custom_date_frame.pack(side=tk.LEFT, padx=5)
+        else:
+            self.custom_date_frame.pack_forget()
+        self._on_filter_changed()
+
+    def _on_filter_changed(self, event=None):
+        """Handle filter changes and update the display"""
+        try:
+            # Clear existing items
+            for item in self.patient_tree.get_children():
+                self.patient_tree.delete(item)
+            
+            # Build the WHERE clause based on filters
+            where_clauses = []
+            params = []
+            
+            # Date filter
+            date_range = self.date_range_var.get()
+            if date_range != "All":
+                if date_range == "Today":
+                    where_clauses.append("DATE(created_at) = DATE('now')")
+                elif date_range == "Last 7 Days":
+                    where_clauses.append("created_at >= datetime('now', '-7 days')")
+                elif date_range == "Last 30 Days":
+                    where_clauses.append("created_at >= datetime('now', '-30 days')")
+                elif date_range == "Custom":
+                    if self.date_from_var.get():
+                        where_clauses.append("created_at >= ?")
+                        params.append(f"{self.date_from_var.get()} 00:00:00")
+                    if self.date_to_var.get():
+                        where_clauses.append("created_at <= ?")
+                        params.append(f"{self.date_to_var.get()} 23:59:59")
+            
+            # Status filter
+            status_filter = self.status_filter_var.get()
+            if status_filter != "All":
+                if status_filter == "Synced":
+                    where_clauses.append("sync_status = 'synced'")
+                else:  # Not Synced
+                    where_clauses.append("(sync_status IS NULL OR sync_status != 'synced')")
+            
+            # Search filter
+            search_text = self.search_var.get().strip()
+            if search_text:
+                where_clauses.append("(patient_id LIKE ? OR name LIKE ? OR sample_id LIKE ?)")
+                search_param = f"%{search_text}%"
+                params.extend([search_param, search_param, search_param])
+            
+            # Construct the final query
+            query = '''
+                SELECT id, patient_id, name, dob, sex, physician, sample_id, created_at, sync_status
+                FROM patients
+            '''
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+            query += " ORDER BY created_at DESC LIMIT 100"
+            
+            # Execute query
+            conn = self.db_manager._ensure_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            patients = cursor.fetchall()
+            
+            # Add filtered results to treeview
+            for patient in patients:
+                _, patient_id, name, _, sex, _, sample_id, created_at, sync_status = patient
+                created_date = created_at[:16] if created_at else "-"
+                sync_status = sync_status or "Not Synced"
+                actions = "View Results"
+                
+                if self.config.get("external_server", {}).get("enabled", False):
+                    if sync_status != "synced":
+                        actions += " | Sync"
+                
+                item_id = self.patient_tree.insert("", tk.END,
+                    values=(patient_id, name, sample_id, sex, created_date, sync_status, actions))
+                
+                tags = ["view_results"]
+                if sync_status != "synced" and self.config.get("external_server", {}).get("enabled", False):
+                    tags.append("sync")
+                self.patient_tree.item(item_id, tags=tuple(tags))
+                
+        except Exception as e:
+            self.logger.error(f"Error applying filters: {e}")
+            messagebox.showerror("Error", f"Failed to apply filters: {str(e)}")
