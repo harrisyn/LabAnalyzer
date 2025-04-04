@@ -1,16 +1,14 @@
 """
 TCP Server implementation for medical analyzer connections with protocol support
 """
-import asyncio
 import socket
 import logging
-import sys
 import threading
 import time
 import errno
 import queue
+import json
 from datetime import datetime
-from tkinter import NORMAL, DISABLED
 from ..utils.analyzers import AnalyzerDefinitions
 from ..protocols.astm_parser import ASTMParser
 from ..protocols.hl7_parser import HL7Parser
@@ -25,12 +23,6 @@ from ..protocols.beckman_parser import BeckmanParser
 class TCPServer:
     """TCP Server implementation for medical analyzer connections"""
     
-    # Control Characters
-    ENQ = b'\x05'  # Enquiry
-    ACK = b'\x06'  # Acknowledge
-    NAK = b'\x15'  # Negative Acknowledge
-    EOT = b'\x04'  # End of Transmission
-    
     # Parser mappings using AnalyzerDefinitions constants
     PARSER_MAP = {
         (AnalyzerDefinitions.MINDRAY_BS_430, AnalyzerDefinitions.PROTOCOL_HL7): HL7Parser,
@@ -40,7 +32,8 @@ class TCPServer:
         (AnalyzerDefinitions.SIEMENS_DIMENSION, AnalyzerDefinitions.PROTOCOL_ASTM): DimensionParser,
         (AnalyzerDefinitions.ABBOTT_ARCHITECT, AnalyzerDefinitions.PROTOCOL_POCT1A): AbbottParser,
         (AnalyzerDefinitions.VITROS, AnalyzerDefinitions.PROTOCOL_ASTM): VitrosParser,
-        (AnalyzerDefinitions.BECKMAN_AU, AnalyzerDefinitions.PROTOCOL_ASTM): BeckmanParser
+        (AnalyzerDefinitions.BECKMAN_AU, AnalyzerDefinitions.PROTOCOL_ASTM): BeckmanParser,
+        (AnalyzerDefinitions.SYSMEX_XN_L, AnalyzerDefinitions.PROTOCOL_ASTM): ASTMParser
     }
 
     def __init__(self, config, db_manager, logger=None, gui_callback=None, sync_manager=None):
@@ -52,15 +45,16 @@ class TCPServer:
         self.gui_queue = queue.Queue()
         self._gui_worker_scheduled = False
         
-        # Get analyzer type and protocol from config, using defaults from AnalyzerDefinitions
-        analyzer_type = self.config.get("analyzer_type", AnalyzerDefinitions.SYSMEX_XN_L)
-        protocol = self.config.get("protocol", AnalyzerDefinitions.get_protocol_for_analyzer(analyzer_type))
+        # Get analyzer type and protocol from config
+        self.analyzer_type = self.config.get("analyzer_type", AnalyzerDefinitions.SYSMEX_XN_L)
+        self.protocol = self.config.get("protocol", AnalyzerDefinitions.get_protocol_for_analyzer(self.analyzer_type))
         
-        self.log_message(f"Initializing server for analyzer: {analyzer_type} with protocol: {protocol}")
+        self.log_message(f"Initializing server for analyzer: {self.analyzer_type} with protocol: {self.protocol}")
         
         # Select appropriate parser
-        self.parser = self._create_parser(analyzer_type, protocol, db_manager, logger, gui_callback)
+        self.parser = self._create_parser()
         
+        # Set sync manager
         self.sync_manager = sync_manager
         if sync_manager and self.parser:
             self.parser.set_sync_manager(sync_manager)
@@ -72,23 +66,46 @@ class TCPServer:
         self.server_thread = None
         self.sock = None
 
-    def _create_parser(self, analyzer_type, protocol, db_manager, logger, gui_callback):
+    def _create_parser(self):
         """Create appropriate parser based on analyzer type and protocol"""
-        parser_class = self.PARSER_MAP.get((analyzer_type, protocol), ASTMParser)
-        parser = parser_class(db_manager, logger)
+        parser_class = self.PARSER_MAP.get((self.analyzer_type, self.protocol), ASTMParser)
         
-        # Set GUI callback using the thread-safe mechanism
-        if gui_callback:
-            parser.set_gui_callback(gui_callback)
-            
+        self.log_message(f"Using parser: {parser_class.__name__}")
+        
+        # Create parser with configuration
+        parser = parser_class(
+            self.db_manager, 
+            self.logger, 
+            gui_callback=self.gui_callback,
+            config=self.config
+        )
+        
         return parser
+
+    def log_message(self, message, level="info"):
+        """Log messages to logger and UI in a thread-safe way"""
+        if level == "info":
+            self.logger.info(message)
+        elif level == "error":
+            self.logger.error(message)
+        elif level == "warning":
+            self.logger.warning(message)
         
+        # Queue GUI update instead of direct call
+        self.queue_gui_update('log', message)
+
+    def queue_gui_update(self, action: str, *args):
+        """Queue a GUI update to be processed in the main thread"""
+        if self.gui_callback:
+            self.gui_queue.put((action, *args))
+            self._schedule_gui_worker()
+
     def _schedule_gui_worker(self):
         """Schedule the GUI worker if not already scheduled"""
         if not self._gui_worker_scheduled and self.gui_callback and hasattr(self.gui_callback, 'root'):
             self.gui_callback.root.after(100, self._process_gui_queue)
             self._gui_worker_scheduled = True
-            
+
     def _process_gui_queue(self):
         """Process pending GUI updates"""
         if not self.gui_callback or not hasattr(self.gui_callback, 'root'):
@@ -109,323 +126,248 @@ class TCPServer:
         finally:
             if self.is_running and self.gui_callback and hasattr(self.gui_callback, 'root'):
                 self.gui_callback.root.after(100, self._process_gui_queue)
-                
-    def queue_gui_update(self, action: str, *args):
-        """Queue a GUI update to be processed in the main thread"""
-        if self.gui_callback:
-            self.gui_queue.put((action, *args))
-            self._schedule_gui_worker()
-
-    def log_message(self, message, level="info"):
-        """Log messages to logger and UI in a thread-safe way"""
-        if level == "info":
-            self.logger.info(message)
-        elif level == "error":
-            self.logger.error(message)
-        
-        # Queue GUI update instead of direct call
-        self.queue_gui_update('log', message)
-
-    def _cleanup_socket(self, socket_obj):
-        """Clean up a socket safely"""
-        if socket_obj:
-            try:
-                socket_obj.shutdown(socket.SHUT_RDWR)
-            except (OSError, socket.error):
-                pass  # Socket may not be connected
-            try:
-                socket_obj.close()
-            except (OSError, socket.error) as e:
-                self.log_message(f"Error closing socket: {e}", level="error")
-
-    def _cleanup_all_clients(self):
-        """Close all client connections"""
-        for client_id, client in list(self.clients.items()):
-            if client["status"] == "connected":
-                client_sock = client.get("sock")
-                if client_sock:
-                    self._cleanup_socket(client_sock)
-        self.clients.clear()
-
-    def _initialize_server_socket(self, port):
-        """Initialize and bind the server socket"""
-        # Create a fresh socket
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        # Windows-specific: disable nagle algorithm
-        if hasattr(socket, 'TCP_NODELAY'):
-            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        
-        # Add a short delay to ensure previous socket is fully released
-        time.sleep(0.1)
-        
-        # Bind socket
-        self.sock.bind(('0.0.0.0', port))
-        self.sock.listen(100)
-        self.log_message(f"Socket bound successfully to port {port}")
-
-    def start(self):
-        """Start the TCP server with improved cleanup for restart scenarios"""
-        if self.is_running:
-            self.log_message("Server is already running")
-            return True
-
-        # Set running flag and start the GUI queue processor
-        self.is_running = True
-        if self.gui_callback and hasattr(self.gui_callback, 'root'):
-            self.gui_callback.root.after(100, self._process_gui_queue)
-        
-        # Start server thread
-        self.server_thread = threading.Thread(target=self._initialize_and_serve)
-        self.server_thread.daemon = True
-        self.server_thread.start()
-        
-        # Give the thread a moment to try initialization
-        time.sleep(0.1)
-        
-        # Check if we're still running (no errors occurred)
-        if self.is_running:
-            self.notify_server_started()
-            return True
-        return False
-
-    def _initialize_and_serve(self):
-        """Initialize socket and start serving in worker thread"""
-        try:
-            port = self.config.get("port", 5000)
-            
-            # Check if port is available
-            if not self._is_port_available(port):
-                self.log_message(f"Port {port} is already in use. Please try a different port.", level="error")
-                self.is_running = False
-                return
-                
-            self.log_message(f"Starting server on port {port}...")
-            
-            # Clean up any existing resources
-            self._cleanup_socket(self.sock)
-            self.sock = None
-            self.clients.clear()
-            
-            # Initialize new server socket
-            try:
-                self._initialize_server_socket(port)
-                # Queue success message
-                self.queue_gui_update('log', f"Socket bound successfully to port {port}")
-            except OSError as e:
-                self.log_message(f"Failed to bind to port {port}: {e}", level="error")
-                self.is_running = False
-                return
-                
-            addr = self.sock.getsockname()
-            self.log_message(f"Server now listening on {addr[0]}:{addr[1]}")
-            
-            # Now begin accepting connections
-            self._serve()
-            
-        except Exception as e:
-            self.log_message(f"Unexpected error starting server: {e}", level="error")
-            self.is_running = False
-
-    async def stop(self):
-        """Stop the TCP server asynchronously"""
-        if not self.is_running:
-            return True
-
-        try:
-            self.log_message("Stopping server asynchronously...")
-            self.is_running = False
-            
-            # Clean up connections
-            self._cleanup_all_clients()
-            self._cleanup_socket(self.sock)
-            self.sock = None
-            
-            # Wait for server thread
-            if self.server_thread and self.server_thread.is_alive():
-                await asyncio.sleep(0.5)
-            
-            self.log_message("Server stopped successfully")
-            self.notify_server_stopped()
-            return True
-
-        except Exception as e:
-            self.log_message(f"Error stopping server: {e}", level="error")
-            self.is_running = False
-            return False
-
-    def stop_sync(self):
-        """Synchronous version of stop for cases where async isn't available"""
-        if not self.is_running:
-            return True
-
-        try:
-            self.log_message("Stopping server (sync)...")
-            self.is_running = False
-            
-            # Clean up connections
-            self._cleanup_all_clients()
-            self._cleanup_socket(self.sock)
-            self.sock = None
-            
-            # Wait for server thread
-            if self.server_thread and self.server_thread.is_alive():
-                time.sleep(0.5)
-            
-            self.log_message("Server stopped successfully (sync)")
-            self.notify_server_stopped()
-            return True
-            
-        except Exception as e:
-            self.log_message(f"Error stopping server (sync): {e}", level="error")
-            self.is_running = False
-            return False
-
-    def _is_port_available(self, port):
-        """Check if the specified port is available"""
-        try:
-            # Create a temporary socket to test port availability
-            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test_socket.settimeout(1)
-            result = test_socket.connect_ex(('127.0.0.1', port))
-            test_socket.close()
-            
-            # If result is 0, the port is in use
-            return result != 0
-        except Exception:
-            # If there's any error checking, assume port is not available to be safe
-            return False
-            
-    def _serve(self):
-        """Background task to keep server running"""
-        try:
-            # Set a timeout so the loop can regularly check if is_running is still True
-            self.sock.settimeout(0.5)  # 500ms timeout
-            
-            while self.is_running:
-                try:
-                    client_sock, addr = self.sock.accept()
-                    client_thread = threading.Thread(target=self.handle_client, args=(client_sock, addr))
-                    client_thread.daemon = True
-                    client_thread.start()
-                except socket.timeout:
-                    # This is expected due to our timeout - just loop again
-                    continue
-                except OSError as e:
-                    # Socket was probably closed - check if we're still supposed to be running
-                    if self.is_running:
-                        self.log_message(f"Error accepting connection: {e}", level="error")
-                    break
-        except Exception as e:
-            if self.is_running:  # Only log if we weren't intentionally stopped
-                self.log_message(f"Error in server task: {e}", level="error")
-
-    def _register_client(self, client_id, addr, client_sock):
-        """Register a new client connection"""
-        self.clients[client_id] = {
-            "address": addr[0],
-            "port": addr[1],
-            "connected_at": datetime.now().isoformat(),
-            "status": "connected",
-            "sock": client_sock
-        }
-        
-        self.log_message(f"New client connected from {addr[0]}:{addr[1]}")
-        self.gui_queue.put(('update_connection_count',))
-        self.gui_queue.put(('log_connection', addr[0], addr[1]))
-
-    def _handle_client_data(self, client_sock, addr, loop):
-        """Handle data from a client connection"""
-        try:
-            data = client_sock.recv(4096)
-            if not data:
-                return False
-            
-            self.log_message(f"Received {len(data)} bytes from {addr[0]}:{addr[1]}")
-            
-            # Check for ENQ immediately before passing to parser
-            if data == self.ENQ:
-                self.log_message("Received ENQ - sending immediate ACK")
-                client_sock.sendall(self.ACK)
-                return True
-            
-            # Process through the selected parser
-            if self.parser:
-                try:
-                    response = loop.run_until_complete(self.parser.process_data(data))
-                    if response:
-                        client_sock.sendall(response)
-                except Exception as e:
-                    self.log_message(f"Error processing data: {e}", level="error")
-                    client_sock.sendall(self.NAK)
-            return True
-        except socket.timeout:
-            # This is expected due to our timeout
-            return True
-        except Exception as e:
-            if self.is_running:
-                self.log_message(f"Error receiving data from {addr[0]}:{addr[1]}: {e}", level="error")
-            return False
-
-    def _cleanup_client(self, client_id, addr, client_sock, loop):
-        """Clean up client connection resources"""
-        client_sock.close()
-        self.clients[client_id]["status"] = "disconnected"
-        self.log_message(f"Client {addr[0]}:{addr[1]} disconnected")
-        
-        # Queue GUI updates
-        self.gui_queue.put(('update_connection_count',))
-        self.gui_queue.put(('log_disconnection', addr[0], addr[1]))
-        
-        # Close the event loop
-        loop.close()
 
     def handle_client(self, client_sock, addr):
         """Handle client connection in a separate thread"""
         client_id = f"{addr[0]}:{addr[1]}"
         
-        # Register new client
-        self._register_client(client_id, addr, client_sock)
-        
-        # Create an event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
         try:
-            client_sock.settimeout(0.5)  # Set timeout for periodic server status check
+            # Set socket options for better performance
+            client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Set a reasonable timeout
+            client_sock.settimeout(1.0)
+            
+            # Register new client
+            self._register_client(client_id, addr, client_sock)
+            
+            # Main client loop
             while self.is_running:
-                if not self._handle_client_data(client_sock, addr, loop):
+                try:
+                    # Receive data with timeout
+                    data = client_sock.recv(4096)
+                    
+                    # Check if connection closed
+                    if not data:
+                        self.log_message(f"Connection closed by {addr[0]}:{addr[1]}")
+                        break
+                    
+                    self.log_message(f"Received {len(data)} bytes from {addr[0]}:{addr[1]}")
+                    
+                    # Log raw data for debugging (if enabled)
+                    if self.config.get("debug_raw_data", False):
+                        try:
+                            self.log_message(f"Raw data: {data!r}")
+                        except Exception:
+                            self.log_message(f"Raw data: [Binary data of {len(data)} bytes]")
+                    
+                    # Let the parser handle the data and get the response
+                    # All protocol-specific logic is now in the parser
+                    response = self.parser.handle_data(data)
+                    
+                    # Send the response if one was returned
+                    if response:
+                        self.log_message(f"Sending response: {response!r}")
+                        client_sock.sendall(response)
+                    
+                except socket.timeout:
+                    # Socket timeout - check if still running
+                    continue
+                except socket.error as e:
+                    if e.errno == errno.EWOULDBLOCK:
+                        continue
+                    elif e.errno == errno.ECONNRESET:
+                        self.log_message(f"Connection reset by {addr[0]}:{addr[1]}", level="info")
+                        break
+                    else:
+                        self.log_message(f"Socket error: {e}", level="error")
+                        break
+                except Exception as e:
+                    self.log_message(f"Error handling client data: {e}", level="error")
+                    import traceback
+                    self.log_message(traceback.format_exc(), level="error")
                     break
-        finally:
-            self._cleanup_client(client_id, addr, client_sock, loop)
-
-    def notify_server_started(self):
-        if self.gui_callback and hasattr(self.gui_callback, 'server_started'):
-            self.gui_callback.server_started()
-
-    def notify_server_stopped(self):
-        if self.gui_callback and hasattr(self.gui_callback, 'server_stopped'):
-            self.gui_callback.server_stopped()
-
-    def get_status(self):
-        """Get current server status"""
-        if not self.is_running:
-            return "Stopped"
         
-        active_clients = sum(1 for c in self.clients.values() if c["status"] == "connected")
-        return f"Running (Clients: {active_clients})"
+        except Exception as e:
+            self.log_message(f"Error in client handler: {e}", level="error")
+        
+        finally:
+            # Clean up client resources
+            try:
+                client_sock.close()
+                
+                # Update client status
+                if client_id in self.clients:
+                    self.clients[client_id]["status"] = "disconnected"
+                    
+                self.log_message(f"Client {addr[0]}:{addr[1]} disconnected")
+                
+                # Queue GUI updates
+                self.queue_gui_update('update_connection_count')
+                self.queue_gui_update('log_disconnection', addr[0], addr[1])
+            except Exception as e:
+                self.log_message(f"Error during client cleanup: {e}", level="error")
+
+    def start(self):
+        """Start the TCP server"""
+        if self.is_running:
+            self.log_message("Server is already running")
+            return True
+
+        # Set running flag
+        self.is_running = True
+        
+        # Start the server in a separate thread to avoid blocking UI
+        self.server_thread = threading.Thread(target=self._run_server)
+        self.server_thread.daemon = True
+        self.server_thread.start()
+        
+        # Return immediately to keep UI responsive
+        return True
+
+    def _run_server(self):
+        """Run server in background thread"""
+        try:
+            # Log server startup
+            port = self.config.get("port", 5000)
+            self.log_message(f"Starting server on port {port}...")
+            
+            # Initialize server socket
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.sock.bind(('0.0.0.0', port))
+                self.sock.listen(5)
+                self.log_message(f"Server now listening on 0.0.0.0:{port}")
+            except OSError as e:
+                self.log_message(f"Failed to bind to port {port}: {e}", level="error")
+                self.is_running = False
+                self.queue_gui_update('server_stopped')
+                return False
+                
+            # Notify GUI of successful startup
+            self.queue_gui_update('server_started')
+            
+            # Set a reasonable timeout to allow checking is_running flag
+            self.sock.settimeout(1.0)
+            
+            # Accept client connections
+            while self.is_running:
+                try:
+                    client_sock, addr = self.sock.accept()
+                    self.log_message(f"New client connected from {addr[0]}:{addr[1]}")
+                    
+                    # Start client handler in a separate thread
+                    client_thread = threading.Thread(target=self.handle_client, args=(client_sock, addr))
+                    client_thread.daemon = True
+                    # Store thread reference in the clients dictionary for proper cleanup
+                    client_id = f"{addr[0]}:{addr[1]}"
+                    if client_id not in self.clients:
+                        self.clients[client_id] = {}
+                    self.clients[client_id]["thread"] = client_thread
+                    client_thread.start()
+                    
+                    # Queue GUI update
+                    self.queue_gui_update('update_connection_count')
+                    self.queue_gui_update('log_connection', addr[0], addr[1])
+                    
+                except socket.timeout:
+                    # This is expected due to the timeout we set
+                    continue
+                except Exception as e:
+                    if self.is_running:  # Only log errors if we're still supposed to be running
+                        self.log_message(f"Error accepting connection: {e}", level="error")
+            
+            self.log_message("Server stopping...")
+            return True
+            
+        except Exception as e:
+            self.log_message(f"Server error: {e}", level="error")
+            self.is_running = False
+            self.queue_gui_update('server_stopped')
+            return False
+
+    def stop(self):
+        """Stop the TCP server"""
+        if not self.is_running:
+            return True
+            
+        self.log_message("Stopping server...")
+        self.is_running = False
+        
+        # Close listening socket
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception as e:
+                self.log_message(f"Error closing server socket: {e}", level="error")
+        
+        # Close all client connections
+        for client_id, client_info in list(self.clients.items()):
+            if "socket" in client_info and client_info["socket"]:
+                try:
+                    client_info["socket"].close()
+                except Exception:
+                    pass
+            # Join client threads for proper cleanup
+            if "thread" in client_info and client_info["thread"].is_alive():
+                client_info["thread"].join(timeout=2.0)
+        
+        # Wait for server thread to finish
+        if self.server_thread and self.server_thread.is_alive():
+            self.server_thread.join(timeout=2.0)
+        
+        # Clear client list
+        self.clients = {}
+        
+        # Notify GUI
+        self.queue_gui_update('server_stopped')
+        
+        return True
+
+    def stop_sync(self):
+        """Synchronously stop the server - for shutdown"""
+        self.stop()
+
+    def _register_client(self, client_id, addr, sock):
+        """Register a new client connection"""
+        self.clients[client_id] = {
+            "address": addr[0],
+            "port": addr[1],
+            "socket": sock,
+            "status": "connected",
+            "connected_at": datetime.now().isoformat()
+        }
+        
+        # Update GUI
+        self.queue_gui_update('update_connection_count')
+        self.queue_gui_update('log_connection', addr[0], addr[1])
 
     def get_clients(self):
-        """Get list of connected clients"""
-        return {k: v for k, v in self.clients.items() if v["status"] == "connected"}
+        """Get a list of connected clients"""
+        return self.clients
 
-    def start_threaded(self):
-        """Start the TCP server in a separate thread"""
-        server_thread = threading.Thread(target=self.run_server)
-        server_thread.daemon = True  # This allows the thread to exit when the main program exits
-        server_thread.start()
+    def _is_port_available(self, port):
+        """Check if a port is available for binding"""
+        try:
+            # Try to create a socket and bind to the port
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.bind(('0.0.0.0', port))
+            s.close()
+            return True
+        except Exception:
+            return False
 
-    def run_server(self):
-        """Run the TCP server in the event loop"""
-        self.start()  # Now we use the synchronous version which creates its own thread
+    def set_gui_callback(self, callback):
+        """Set the GUI callback safely"""
+        self.gui_callback = callback
+        if hasattr(self, 'parser') and self.parser:
+            self.parser.set_gui_callback(callback)
+
+    def is_port_in_use(self, port):
+        """Check if the specified port is in use"""
+        return not self._is_port_available(port)
+
+    def get_client_count(self):
+        """Get the count of active clients"""
+        return len([c for c in self.clients.values() if c.get("status") == "connected"])

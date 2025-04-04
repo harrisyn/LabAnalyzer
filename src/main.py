@@ -8,6 +8,7 @@ import tkinter as tk
 from pathlib import Path
 import nest_asyncio
 import threading
+import time
 
 # Add src directory to Python path for module imports
 sys.path.append(str(Path(os.path.dirname(os.path.abspath(__file__))).parent))
@@ -115,6 +116,32 @@ def main():
         # Initialize all components
         root, config, logger, db_manager, tcp_server, sync_manager, app, app_loop = \
             loop.run_until_complete(setup_application())
+        
+        # Add watchdog timer to detect freezes
+        last_update_time = [time.time()]  # Use list for nonlocal access in nested function
+        
+        def check_alive():
+            current_time = time.time()
+            if current_time - last_update_time[0] > 10:  # Over 10 seconds without update
+                logger.warning("Possible UI freeze detected - attempting recovery")
+                try:
+                    # Attempt to process any pending events
+                    root.update_idletasks()
+                except Exception as e:
+                    logger.error(f"Error during freeze recovery: {e}")
+            last_update_time[0] = current_time
+            if root.winfo_exists():
+                root.after(5000, check_alive)
+        
+        # Start watchdog after a short delay
+        root.after(5000, check_alive)
+        
+        # Update function that resets the watchdog timer
+        original_update = app.update_results
+        def wrapped_update_results():
+            last_update_time[0] = time.time()  # Reset watchdog timer
+            return original_update()
+        app.update_results = wrapped_update_results
         
         # Schedule first GUI update
         root.after(1000, lambda: periodic_gui_update(app, root))

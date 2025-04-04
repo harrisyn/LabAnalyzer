@@ -200,37 +200,33 @@ class SyncManager:
     
     async def _send_to_server(self, payload):
         """
-        Send data to external server
+        Send data to the external server
         
         Args:
             payload: Data payload to send
             
         Returns:
-            Tuple (success, message) - success status and message
+            Tuple (success, message)
         """
-        if not hasattr(self, '_session'):
-            self._session = aiohttp.ClientSession()
-        
-        # Get base URL
-        base_url = self._get_server_url()
-        if not base_url:
-            return False, "Server URL not configured"
-        
-        # Get endpoint path and construct full URL
+        # Get the server URL from config
+        url = self._get_server_url()
+        if not url:
+            return False, "External server URL not configured"
+            
+        # Get server config
         ext_server_config = self.config.get("external_server", {})
-        endpoint_path = ext_server_config.get("endpoint_path", "/api/results")
-        url = f"{base_url.rstrip('/')}/{endpoint_path.lstrip('/')}"
         
         # Get HTTP method
-        http_method = ext_server_config.get("http_method", "POST").lower()
+        http_method = ext_server_config.get("http_method", "post").lower()
         
         # Prepare headers
         headers = {
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "User-Agent": f"BasicAnalyzer/{self.config.get('version', '1.0.0')}"
         }
         
-        # Get authentication method and prepare headers
+        # Add authentication based on config
         auth_method = ext_server_config.get("auth_method", "api_key")
         
         if auth_method == "api_key":
@@ -268,7 +264,8 @@ class SyncManager:
                 return False, "Failed to obtain OAuth2 token"
         
         try:
-            async with aiohttp.ClientSession() as session:
+            # Create a new session for each request to avoid connection pool issues
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
                 http_methods = {
                     "post": session.post,
                     "put": session.put,
@@ -279,7 +276,10 @@ class SyncManager:
                 
                 self.logger.debug(f"Sending {http_method.upper()} request to {url}")
                 
-                async with method(url, json=payload, headers=headers, auth=auth) as response:
+                # Set timeout to prevent blocking indefinitely
+                timeout = aiohttp.ClientTimeout(total=30)
+                
+                async with method(url, json=payload, headers=headers, auth=auth, timeout=timeout) as response:
                     if response.status in (200, 201, 202, 204):
                         # Reset retry delay on success
                         self.retry_delay = self.initial_retry_delay
@@ -292,16 +292,13 @@ class SyncManager:
             # Apply exponential backoff for retry
             self.retry_delay = min(self.retry_delay * 2, self.max_retry_delay)
             return False, f"Connection error: {str(e)}. Will retry in {self.retry_delay} seconds."
+        except asyncio.TimeoutError:
+            return False, f"Request timed out after 30 seconds"
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
                 raise  # Re-raise CancelledError to handle it properly
             return False, f"Error sending data to server: {str(e)}"
-        finally:
-            if not self.running:
-                # Close session if we're shutting down
-                await self._session.close()
-                self._session = None
-            
+
     async def _get_oauth2_token(self):
         """
         Get OAuth2 access token from token endpoint

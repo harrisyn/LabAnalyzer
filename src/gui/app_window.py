@@ -846,11 +846,21 @@ class ApplicationWindow:
             print(f"Error inserting log message: {e}")
     
     def log(self, message, level="INFO"):
-        """Add a message to the log display"""
-        # Forward to the logger which will call back through _handle_log_message
-        if hasattr(self.logger, level.lower()):
-            getattr(self.logger, level.lower())(message)
-            
+        """Add a message to the log display with thread safety"""
+        try:
+            # Execute in a thread-safe way through the event loop
+            self.root.after(0, lambda: self._add_log_to_ui(message))
+        except Exception as e:
+            print(f"Error logging to UI: {e}")
+
+    def _add_log_to_ui(self, message):
+        """Add a log message to the UI"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        if hasattr(self, 'log_text') and self.log_text.winfo_exists():
+            self.log_text.insert(tk.END, f"{timestamp} - {message}\n")
+            self.log_text.see(tk.END)
+
     def _show_scattergram(self):
         """Show the scattergram frame"""
         if not self.scatter_frame:
@@ -875,55 +885,6 @@ class ApplicationWindow:
             self.scatter_plot = None
             self.scatter_canvas = None
             
-    def log(self, message):
-        """Add a message to the log display"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        try:
-            # Only update UI in a thread-safe way
-            self.root.after(0, lambda: self._safe_add_log_to_ui(message, timestamp))
-        except Exception as e:
-            print(f"Error logging to UI: {e}")
-    
-    def _safe_add_log_to_ui(self, message, timestamp):
-        """Thread-safe method to add logs to the UI"""
-        try:
-            # Use a lock to prevent concurrent modifications to the UI
-            with self.log_lock:
-                # Only try to access UI elements if the window still exists
-                if self.is_destroyed or not self.root.winfo_exists():
-                    return
-                    
-                self._add_log_to_ui(message, timestamp)
-        except Exception as e:
-            print(f"Error adding log to UI: {e}")
-    
-    def _add_log_to_ui(self, message, timestamp):
-        """Add a log message to the UI with filtering"""
-        # Apply filter - with safety check
-        try:
-            if hasattr(self, 'log_filter') and self.log_filter.winfo_exists():
-                filter_val = self.log_filter.get().lower()
-                if filter_val != "all" and filter_val not in message.lower():
-                    return
-        except Exception as e:
-            # If there's any error with the filter, show the message anyway
-            print(f"Error applying log filter: {e}")
-        
-        # Insert into text widget
-        if hasattr(self, 'log_text') and self.log_text.winfo_exists():
-            self.log_text.insert(tk.END, f"{timestamp} - {message}\n")
-            self.log_text.see(tk.END)
-            
-            # Highlight error messages
-            if "error" in message.lower():
-                # Find the line we just added
-                line_count = int(self.log_text.index('end-1c').split('.')[0])
-                line_start = f"{line_count}.0"
-                line_end = f"{line_count}.end"
-                self.log_text.tag_add("error", line_start, line_end)
-                self.log_text.tag_config("error", foreground="red")
-        
     def update_scattergram(self, data):
         """Update the scattergram display"""
         if self.scatter_frame and self.scatter_plot:
@@ -977,103 +938,46 @@ class ApplicationWindow:
             return False
 
     def start_server(self):
-        """Start the TCP server in a separate thread"""
+        """Start the TCP server in a non-blocking way"""
         if self.tcp_server.is_running:
-            self.logger.error("Server is already running.")
+            self.logger.warning("Server is already running")
             return
+        
+        # Update UI immediately to provide feedback
+        self.server_status.config(text="Server: Starting...")
+        
+        # Start the server (non-blocking)
+        self.tcp_server.start()
 
-        try:
-            # Update UI immediately
-            self.db_manager.log_info("Starting server...", source="app")
-            self.log("Starting server...")
-            self.start_button.config(state=tk.DISABLED)
-            self.server_status.config(text=self.STATUS_SERVER_STARTING)
-
-            start_thread = threading.Thread(target=self._start_server_worker)
-            start_thread.daemon = True
-            start_thread.start()
-
-        except Exception as e:
-            self.logger.error(f"Error initiating server start: {e}")
-            self._handle_server_error(str(e))
-
-    def _handle_server_error(self, error_msg):
-        """Handle server start errors in the main thread"""
-        self.start_button.config(state=tk.NORMAL)
-        self.server_status.config(text="Server: Error")
-        messagebox.showerror("Error", f"Failed to start server: {error_msg}")
-
-    def _start_server_worker(self):
-        """Worker method to handle server startup in a separate thread"""
-        try:
-            # Setup sync manager if needed
-            if hasattr(self.tcp_server, 'sync_manager') and self.tcp_server.sync_manager is None:
-                self.tcp_server.sync_manager = self.sync_manager
-                if self.sync_manager and self.tcp_server.parser:
-                    self.tcp_server.parser.set_sync_manager(self.sync_manager)
-
-            # Start the server
-            start_success = self.tcp_server.start()
-
-            # Update UI in main thread
-            if start_success:
-                self.root.after(0, self._server_started_ui_update)
-                
-                # Start sync manager in a separate thread if enabled
-                if self.config.get("external_server", {}).get("enabled", False):
-                    sync_thread = threading.Thread(target=self._start_sync_worker)
-                    sync_thread.daemon = True
-                    sync_thread.start()
-            else:
-                self.root.after(0, self._server_start_failed_ui_update)
-
-        except Exception as e:
-            self.logger.error(f"Error in server start thread: {e}")
-            self.root.after(0, lambda: self._handle_server_error(str(e)))
-
-    def _start_sync_worker(self):
-        """Worker method to handle sync manager startup"""
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.sync_manager.start())
-            loop.close()
-        except Exception as sync_err:
-            self.logger.error(f"Error starting sync manager: {sync_err}")
-
-    def _server_started_ui_update(self):
-        """Update UI after server has started successfully"""
+    def server_started(self):
+        """Update UI when server starts"""
         port = self.config.get('port', 5000)
         self.server_status.config(text=f"Server: Running on port {port}")
         self.port_status.config(text=f"Port: {port} (Active)")
         self.start_button.config(state=tk.DISABLED)
         self.log("Server started successfully")
-        
-        # Start periodic updates
-        self._schedule_updates()
-
-    def _server_start_failed_ui_update(self):
-        """Update UI after server failed to start"""
-        self.server_status.config(text=self.STATUS_SERVER_FAILED)
-        self.start_button.config(state=tk.NORMAL)
-        self.log("Failed to start server. Check logs for details.")
-        messagebox.showerror("Error", "Failed to start server. Check logs for details.")
-
-    def server_started(self):
-        """Handle server started notification"""
-        self.logger.info("Server has started. Updating UI.")
-        self.start_button.config(state=tk.DISABLED)  # Disable start button
-        self.update_connection_count()  # Update connection count when server starts
 
     def server_stopped(self):
-        """Handle server stopped notification"""
-        self.start_button.config(state=tk.NORMAL)  # Enable start button
-        self.update_connection_count()  # Update connection count when server stops
+        """Update UI when server stops"""
+        self.server_status.config(text="Server: Stopped")
+        self.connection_status.config(text="Connections: 0")
+        self.start_button.config(state=tk.NORMAL)
+        self.log("Server stopped")
 
     def update_connection_count(self):
-        """Update the connection count label"""
-        connection_count = len(self.tcp_server.clients)  # Assuming clients is a dictionary of connected clients
-        self.connection_count_label.config(text=f"Connections: {connection_count}")
+        """Update the connection count display"""
+        if self.tcp_server:
+            count = self.tcp_server.get_client_count()
+            self.connection_status.config(text=f"Connections: {count}")
+            self.connection_count_label.config(text=f"Connections: {count}")
+
+    def log_connection(self, host, port):
+        """Log a new connection"""
+        self.log(f"New connection from {host}:{port}")
+
+    def log_disconnection(self, host, port):
+        """Log a disconnection"""
+        self.log(f"Client {host}:{port} disconnected")
 
     async def _cleanup(self):
         """Clean up async resources"""
@@ -1162,18 +1066,6 @@ class ApplicationWindow:
                 self.sync_status.config(text="Sync: Disabled")
         except Exception as e:
             self.logger.error(f"Error updating UI status: {e}")
-
-    def log_connection(self, address, port):
-        """Log connections from other servers to the port"""
-        message = f"Connection from {address}:{port}"
-        self.log(message)
-        self.logger.info(message)
-
-    def log_disconnection(self, address, port):
-        """Log disconnections from other servers to the port"""
-        message = f"Disconnection from {address}:{port}"
-        self.log(message)
-        self.logger.info(message)
 
     def _auto_start_server_threaded(self):
         """Auto-start server in a separate thread to prevent UI freezing"""

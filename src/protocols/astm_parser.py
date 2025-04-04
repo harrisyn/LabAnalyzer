@@ -6,13 +6,17 @@ import re
 import asyncio
 import queue
 import threading
-from typing import Optional, Dict, Any
+import json
+from typing import Optional, Dict, Any, List, Tuple
 from .base_parser import BaseParser
 from .scattergram_decoder import ScattergramDecoder
 
 class ASTMParser(BaseParser):
     """
     Parser for ASTM protocol data from medical analyzers
+    
+    This class handles all ASTM-specific communication and parsing logic,
+    including complete message collection, framing, and acknowledgment.
     """
     # ASTM Control Characters
     STX = b'\x02'  # Start of Text
@@ -37,7 +41,7 @@ class ASTMParser(BaseParser):
         'L': 'Terminator'
     }
     
-    def __init__(self, db_manager, logger, gui_callback=None):
+    def __init__(self, db_manager, logger, gui_callback=None, config=None):
         """
         Initialize the parser
         
@@ -45,477 +49,540 @@ class ASTMParser(BaseParser):
             db_manager: DatabaseManager instance for storing parsed data
             logger: Logger instance for logging events
             gui_callback: Optional callback function for GUI updates
+            config: Configuration dictionary for parser-specific settings
         """
         super().__init__(db_manager, logger)
-        self.current_patient_id = None
-        self.current_frame_number = 0
-        self.current_raw_record = None  # Initialize raw record storage
-        self.full_message_payload = []  # Store full message
-        self.scattergram_decoder = ScattergramDecoder(logger)
+        self.config = config or {}
+        self.sync_manager = None
         self.gui_callback = gui_callback
-        self.sync_manager = None  # Will be set separately
-        self.sequence_number = 0
-        self.pending_results = []
         
-        # Message queue for async processing
-        self.message_queue = queue.Queue()
-        self.message_processor = None
-        self.is_processing = False
+        # Message collection and processing
+        self.current_message_frames = []
+        self.collecting_message = False
+        self.full_raw_payload = ""
+        self.message_counter = 0
         
+        # Initialize the scattergram decoder if needed
+        self.scattergram_decoder = ScattergramDecoder(logger)
+        
+        # Configure parser based on analyzer type
+        self.analyzer_type = self.config.get("analyzer_type", "GENERIC")
+        self.configure_for_analyzer(self.analyzer_type)
+        
+    def configure_for_analyzer(self, analyzer_type):
+        """Configure parser settings based on analyzer type"""
+        self.log_info(f"Configuring ASTM parser for analyzer type: {analyzer_type}")
+        
+        # Default field positions (can be overridden by analyzer-specific settings)
+        self.field_positions = {
+            "patient_id": 4,       # Field 5 (0-indexed)
+            "sample_id": 3,        # Field 4 (0-indexed)
+            "patient_name": 5,     # Field 6 (0-indexed)
+            "date_of_birth": 7,    # Field 8 (0-indexed)
+            "sex": 8,              # Field 9 (0-indexed)
+            "physician": 12,       # Field 13 (0-indexed)
+            
+            # Result record field positions
+            "result_sequence": 1,  # Field 2 (0-indexed)
+            "result_test_code": 2, # Field 3 (0-indexed)
+            "result_value": 3,     # Field 4 (0-indexed)
+            "result_unit": 4,      # Field 5 (0-indexed)
+            "result_flag": 6,      # Field 7 (0-indexed)
+        }
+        
+        # Analyzer-specific configurations
+        if analyzer_type == "SYSMEX XN-L" or analyzer_type == "SYSMEX XN-550":
+            # SYSMEX specific test code pattern
+            self.test_code_pattern = r'\^\^\^\^([A-Za-z0-9\#\_\-\/\?]+)'
+            # Special configuration for SYSMEX
+            self.field_positions.update({
+                "patient_id": 4,        # Field 5 (0-indexed) - 1418626
+                "sample_id": 3,         # Field 4 (0-indexed) - if empty, use patient_id
+                "patient_name": 5,      # Field 6 (0-indexed) - ^FAABAR^AHITOPHEL
+                "date_of_birth": 7,     # Field 8 (0-indexed) - 19830101
+                "sex": 8,               # Field 9 (0-indexed) - M
+                "physician": 14,        # Field 15 (0-indexed) - ^
+            })
+        elif analyzer_type == "ROCHE COBAS":
+            # Different test code pattern for COBAS
+            self.test_code_pattern = r'([A-Za-z0-9]+)\^'
+        else:
+            # Generic pattern for most ASTM implementations
+            self.test_code_pattern = r'\^\^\^\^([A-Za-z0-9\#\_\-\/\?]+)'
+    
     def set_sync_manager(self, sync_manager):
-        """
-        Set the sync manager for real-time synchronization
-        
-        Args:
-            sync_manager: SyncManager instance
-        """
+        """Set the sync manager for real-time synchronization"""
         self.sync_manager = sync_manager
         self.log_info("Sync manager connected to ASTM parser")
     
-    def start_message_processor(self):
-        """Start the message processor thread"""
-        if not self.message_processor or not self.message_processor.is_alive():
-            self.is_processing = True
-            self.message_processor = threading.Thread(target=self._process_message_queue)
-            self.message_processor.daemon = True
-            self.message_processor.start()
-            
-    def stop_message_processor(self):
-        """Stop the message processor thread"""
-        self.is_processing = False
-        if self.message_processor:
-            self.message_processor.join(timeout=1.0)
-            
-    def _process_message_queue(self):
-        """Process messages from the queue"""
-        while self.is_processing:
-            try:
-                # Get message with timeout to allow checking is_processing flag
-                message = self.message_queue.get(timeout=0.5)
-                
-                # Create event loop for async operations
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                try:
-                    # Process the message
-                    loop.run_until_complete(self.process_record(message))
-                except Exception as e:
-                    self.log_error(f"Error processing message: {e}")
-                finally:
-                    loop.close()
-                    self.message_queue.task_done()
-                    
-            except queue.Empty:
-                continue
-            except Exception as e:
-                self.log_error(f"Error in message processor: {e}")
-                
-    async def process_data(self, data: bytes):
+    def set_gui_callback(self, callback):
+        """Set the GUI callback safely"""
+        self.gui_callback = callback
+    
+    def handle_data(self, data: bytes) -> bytes:
         """
-        Process incoming ASTM data
+        Main entry point for handling data from TCP server
         
         Args:
             data: Raw bytes received from the analyzer
-        """
-        self.buffer.extend(data)
-        
-        # Log the raw data received
-        self.log_info(f"Received {len(data)} bytes: {data!r}")
-        
-        # Process ASTM control characters
-        if self.ENQ in self.buffer:
-            # Analyzer is initiating communication
-            self.log_info("Received ENQ (Enquiry)")
-            # Clear buffer and acknowledge
-            self.buffer.clear()
-            self.full_message_payload = []  # Reset full message payload
-            self.start_message_processor()  # Ensure processor is running
-            return self.ACK  # Respond with ACK
-            
-        elif self.EOT in self.buffer:
-            # End of transmission
-            self.log_info("Received EOT (End of Transmission)")
-            self.buffer.clear()
-            self.full_message_payload = []  # Reset full message payload
-            return None
-            
-        # Process message frames
-        while self.CR in self.buffer:
-            # Find the end of a record
-            record_end = self.buffer.index(self.CR)
-            
-            # Extract the record (exclude CR)
-            record = self.buffer[:record_end].decode('ascii', errors='replace')
-            
-            # Queue message for processing
-            self.message_queue.put(record)
-            
-            # Remove the processed record from buffer
-            self.buffer = self.buffer[record_end + 1:]
-            
-            # After processing a record, we acknowledge
-            return self.ACK
-            
-        return None  # No response needed
-    
-    async def process_record(self, record: str):
-        """
-        Process a single ASTM record
-        
-        Args:
-            record: A complete ASTM record string
-        """
-        if not record:
-            return
-            
-        # Log the record
-        self.log_info(f"Processing record: {record}")
-        
-        # Split the record into fields
-        fields = record.split('|')
-        
-        if not fields[0]:
-            self.log_warning(f"Empty record received: {record}")
-            return
-
-        # Extract record type and handle sequence numbering
-        first_field = fields[0].strip()
-        
-        # Handle both numbered and unnumbered formats
-        if len(first_field) > 1 and first_field[:-1].isdigit():
-            # Numbered format (e.g., "1H")
-            record_type = first_field[-1]
-            sequence = first_field[:-1]
-            self.sequence_number = int(sequence)
-        else:
-            # Unnumbered format (e.g., "H")
-            record_type = first_field
-            self.sequence_number += 1
-            sequence = str(self.sequence_number)
-            # Update the first field with the sequence number
-            fields[0] = f"{sequence}{record_type}"
-
-        self.log_info(f"Sequence: {sequence}, Record Type: {record_type} ({self.RECORD_TYPES.get(record_type, 'Unknown')})")
-        
-        # Handle different record types
-        handlers = {
-            'H': self.handle_header,
-            'P': self.handle_patient,
-            'O': self.handle_order,
-            'R': self.handle_result,
-            'C': self.handle_comment,
-            'Q': self.handle_query,
-            'L': self.handle_terminator
-        }
-        
-        if handler := handlers.get(record_type):
-            await handler(fields)
-        else:
-            self.log_warning(f"Unknown record type: {record_type}")
-    
-    async def handle_header(self, fields):
-        """Handle header record"""
-        self.log_info(f"Header Record: {fields}")
-        # Header fields typically include sender info, date/time, etc.
-        # Format: 1H|\\^&|||Host^1|||||Text||||ASTM|...
-        
-        # Reset current patient and start new message payload
-        self.current_patient_id = None
-        self.current_frame_number += 1
-        self.full_message_payload = []  # Reset for new message
-        self.full_message_payload.append('|'.join(fields))  # Add header to payload
-    
-    def extract_patient_info(self, fields):
-        """
-        Extract comprehensive patient information from ASTM Patient record fields
-        
-        Args:
-            fields: The split fields of a patient record
             
         Returns:
-            Dictionary containing parsed patient information
+            Response bytes to send back to the analyzer (ACK, NAK, or None)
         """
         try:
-            # Extract patient ID (field 4, index 3)
-            patient_id = fields[3].strip() if len(fields) > 3 else ""
+            # Log the raw data received
+            self.log_info(f"Received {len(data)} bytes: {data!r}")
             
-            # Extract sample number (field 5, index 4)
-            sample_id = fields[4].strip() if len(fields) > 4 else ""
-            
-            # Extract and parse name (field 6, index 5)
-            name_field = fields[5].strip() if len(fields) > 5 else ""
-            name_parts = name_field.split("^")
-            full_name = " ".join(filter(None, name_parts))  # Remove empty strings
-            
-            # Extract date of birth (field 8, index 7)
-            dob_str = fields[7].strip() if len(fields) > 7 else ""
-            dob = None
-            age = None
-            
-            if dob_str:
-                try:
-                    # Try to parse DOB in YYYYMMDD format
-                    dob = datetime.strptime(dob_str, "%Y%m%d")
+            # Handle ASTM control characters
+            if data == self.ENQ:
+                # Analyzer is initiating communication
+                self.log_info("Received ENQ (Enquiry)")
+                self.collecting_message = True
+                self.current_message_frames = []
+                return self.ACK  # Respond with ACK
+                
+            elif data == self.EOT:
+                # End of transmission - process the complete message
+                self.log_info("Received EOT (End of Transmission)")
+                
+                if self.collecting_message and self.current_message_frames:
+                    # Process the complete message
+                    self._process_complete_message()
                     
-                    # Calculate age
-                    today = datetime.today()
-                    age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
-                    
-                    dob = dob.strftime("%Y-%m-%d")  # Format DOB for readability
-                except ValueError:
-                    # Handle alternative date formats or invalid dates
-                    self.log_warning(f"Could not parse birth date: {dob_str}")
-                    dob = dob_str
+                # Reset collection state
+                self.collecting_message = False
+                self.current_message_frames = []
+                return None  # No response needed
             
-            # Extract sex (field 9, index 8)
-            sex = fields[8].strip() if len(fields) > 8 else ""
-            
-            # Extract physician information (field 15, index 14)
-            physician = fields[14].strip() if len(fields) > 14 else ""
-            
-            # Extract address fields if available
-            address = fields[10].strip() if len(fields) > 10 else ""
-            
-            return {
-                "patient_id": patient_id,
-                "sample_id": sample_id,
-                "patient_name": full_name,
-                "sex": sex,
-                "date_of_birth": dob,
-                "age": age,
-                "physician": physician,
-                "address": address
-            }
-        except Exception as e:
-            self.log_error(f"Error extracting patient info: {e}")
-            return {
-                "patient_id": "",
-                "sample_id": "",
-                "patient_name": "Unknown",
-                "sex": "",
-                "date_of_birth": "",
-                "age": None,
-                "physician": "",
-                "address": ""
-            }
-    
-    async def handle_patient(self, fields):
-        """Handle patient record"""
-        # Format: 2P|1||PatientID|PID^2|||Sex||Address|...
-        self.log_info(f"Patient Record: {fields}")
-        
-        # Add patient record to full message payload
-        self.full_message_payload.append('|'.join(fields))
-        
-        try:
-            # Extract comprehensive patient information
-            patient_info = self.extract_patient_info(fields)
-            
-            # Log detailed patient info
-            self.log_info(f"Extracted patient info: Name={patient_info['patient_name']}, "
-                         f"ID={patient_info['patient_id']}, Sample ID={patient_info['sample_id']}, "
-                         f"Sex={patient_info['sex']}, DOB={patient_info['date_of_birth']}, Age={patient_info['age']}")
-            
-            # Get the full message payload so far
-            full_payload = '\n'.join(self.full_message_payload)
-            
-            # Store patient in database with raw data
-            db_patient_id = self.db_manager.add_patient(
-                patient_info['patient_id'],
-                patient_info['patient_name'],
-                patient_info['date_of_birth'],
-                patient_info['sex'],
-                patient_info['physician'],
-                full_payload,  # Store the full message payload
-                patient_info['sample_id']  # Include sample ID
-            )
-            
-            if db_patient_id:
-                self.current_patient_id = db_patient_id
-                self.log_info(f"Patient stored with DB ID: {db_patient_id} and full payload data")
-                
-                # Update GUI if callback exists
-                if self.gui_callback and hasattr(self.gui_callback, 'update_patient_info'):
-                    try:
-                        # Add database ID to the info
-                        patient_info['db_id'] = db_patient_id
-                        asyncio.get_event_loop().call_soon_threadsafe(
-                            self.gui_callback.update_patient_info,
-                            patient_info
-                        )
-                    except Exception as e:
-                        self.log_error(f"Error updating GUI with patient info: {e}")
-            else:
-                self.log_error(f"Failed to store patient with ID: {patient_info['patient_id']}")
-        except Exception as e:
-            self.log_error(f"Error processing patient record: {e}")
-    
-    async def handle_order(self, fields):
-        """Handle order record"""
-        self.log_info(f"Order Record: {fields}")
-        
-        # Add order record to full message payload
-        self.full_message_payload.append('|'.join(fields))
-    
-    async def handle_result(self, fields):
-        """Handle result record"""
-        # Format: 3R|1|^^^TEST^^Result|Value|Unit|Reference Range|Flags|...
-        self.log_info(f"Result Record: {fields}")
-        
-        # Add result record to full message payload
-        self.full_message_payload.append('|'.join(fields))
-        
-        # Update patient's raw data with the full message payload so far
-        if self.current_patient_id:
-            full_payload = '\n'.join(self.full_message_payload)
-            # Update the patient record with the latest full payload
-            # Pass the database ID directly to ensure we update the existing patient
-            self.db_manager.add_patient(
-                self.current_patient_id,  # Pass the database ID directly
-                None,  # No need to update name
-                None,  # No need to update DOB
-                None,  # No need to update sex
-                None,  # No need to update physician
-                full_payload,  # Update the full message payload
-                None,  # No need to update sample_id
-            )
-        
-        try:
-            if not self.current_patient_id:
-                self.log_warning("No current patient ID for result - ensure patient record is processed before results")
-                return
-                
-            sequence = fields[1] if len(fields) > 1 else ""
-            test_code_complex = fields[2] if len(fields) > 2 else ""
-            value = fields[3] if len(fields) > 3 else ""
-            unit = fields[4] if len(fields) > 4 else ""
-            flags = fields[6] if len(fields) > 6 else ""
-            
-            # Extract test code from complex field (format: ^^^^XXXX^1)
-            test_code_match = re.search(r'\^\^\^\^([A-Za-z0-9]+)', test_code_complex)
-            test_code = test_code_match.group(1) if test_code_match else test_code_complex
-            
-            # Log the extracted test code for debugging
-            self.log_info(f"Extracted test code '{test_code}' from '{test_code_complex}'")
-            
-            # Try to convert value to float for storage, but keep as string if not possible
-            try:
-                value_float = float(value)
-            except (ValueError, TypeError):
-                value_float = None
-                
-            # Store result in database
-            result_id = self.db_manager.add_result(
-                self.current_patient_id, 
-                test_code, 
-                value_float if value_float is not None else value, 
-                unit, 
-                flags,
-                None,  # Keep default timestamp
-                sequence  # Pass the sequence for sorting
-            )
-            
-            if result_id:
-                self.log_info(f"Result stored with ID: {result_id} for patient ID: {self.current_patient_id}")
-            else:
-                self.log_error(f"Failed to store result for patient ID: {self.current_patient_id}")
-        except Exception as e:
-            self.log_error(f"Error processing result record: {e}")
-    
-    async def handle_comment(self, fields):
-        """Handle comment record"""
-        self.log_info(f"Comment Record: {fields}")
-        
-        # Add comment record to full message payload
-        self.full_message_payload.append('|'.join(fields))
-    
-    async def handle_query(self, fields):
-        """Handle query record"""
-        self.log_info(f"Query Record: {fields}")
-        
-        # Add query record to full message payload
-        self.full_message_payload.append('|'.join(fields))
-    
-    async def handle_terminator(self, fields):
-        """Handle termination record"""
-        self.log_info(f"Terminator Record: {fields}")
-        
-        # Add terminator record to full message payload
-        self.full_message_payload.append('|'.join(fields))
-        
-        # Final update of the patient record with complete message
-        if self.current_patient_id:
-            full_payload = '\n'.join(self.full_message_payload)
-            # Update the patient record with the complete payload
-            # Pass the database ID directly to ensure we update the existing patient
-            self.db_manager.add_patient(
-                self.current_patient_id,  # Pass the database ID directly
-                None,  # No need to update name
-                None,  # No need to update DOB
-                None,  # No need to update sex
-                None,  # No need to update physician
-                full_payload,  # Update with the complete message payload
-                None,  # No need to update sample_id
-            )
-            
-            # Try to sync this patient in real-time if sync manager is available
-            if hasattr(self, 'sync_manager') and self.sync_manager:
+            # Handle ASTM framed data (STX...ETX)
+            if data.startswith(self.STX) and (self.ETX in data or self.ETB in data):
                 try:
-                    # Create task to sync in background so we don't block message processing
-                    asyncio.create_task(self.sync_manager.sync_patient_realtime(self.current_patient_id))
+                    # Find the position of the end marker
+                    end_marker = self.ETX if self.ETX in data else self.ETB
+                    end_pos = data.index(end_marker)
+                    
+                    # Extract frame content between STX and ETX/ETB
+                    frame_content = data[1:end_pos].decode('ascii', errors='replace')
+                    
+                    # Log frame information
+                    record_type = "Unknown"
+                    if len(frame_content) >= 2:
+                        record_type_char = frame_content[1] if frame_content[0].isdigit() else frame_content[0]
+                        if record_type_char in self.RECORD_TYPES:
+                            record_type = self.RECORD_TYPES.get(record_type_char, "Unknown")
+                    
+                    self.log_info(f"Received ASTM {record_type} frame - sending immediate ACK")
+                    self.log_info(f"Frame content: {frame_content}")
+                    
+                    # If collecting a message, add this frame
+                    if self.collecting_message:
+                        self.current_message_frames.append(frame_content)
+                        
+                    # Always ACK the frame
+                    return self.ACK
+                    
                 except Exception as e:
-                    self.log_error(f"Error triggering real-time sync: {e}")
+                    self.log_error(f"Error processing ASTM frame: {e}")
+                    # Send NAK on error
+                    return self.NAK
             
-            # Process any pending results
-            for result in self.pending_results:
+            # Return None if no specific response is needed
+            return None
+            
+        except Exception as e:
+            import traceback
+            self.log_error(f"Error in ASTM data handling: {e}\n{traceback.format_exc()}")
+            # Return NAK to indicate error
+            return self.NAK
+    
+    def _process_complete_message(self):
+        """Process a complete ASTM message after all frames are received"""
+        try:
+            self.message_counter += 1
+            message_id = f"MSG{self.message_counter}"
+            
+            self.log_info(f"Processing complete message {message_id} with {len(self.current_message_frames)} frames")
+            
+            # Create the raw payload
+            self.full_raw_payload = "\n".join(self.current_message_frames)
+            
+            # Log the complete raw message payload
+            self.log_info(f"Complete raw message payload ({len(self.full_raw_payload)} bytes):")
+            self.log_info(self.full_raw_payload)
+            
+            # Extract message information
+            message_info = self._extract_message_info()
+            
+            # Add the raw payload to the message info
+            message_info['raw_payload'] = self.full_raw_payload
+            
+            # Process extracted information in a background thread
+            processing_thread = threading.Thread(
+                target=self._background_process_message,
+                args=(message_info,)
+            )
+            processing_thread.daemon = True
+            processing_thread.start()
+            
+            return True
+        except Exception as e:
+            import traceback
+            self.log_error(f"Error processing complete message: {e}\n{traceback.format_exc()}")
+            return False
+    
+    def _extract_message_info(self) -> Dict[str, Any]:
+        """
+        Extract patient and result information from the message frames
+        
+        Returns:
+            Dictionary containing patient information and test results
+        """
+        # Initialize message info
+        message_info = {
+            'patient_id': None,
+            'patient_name': None,
+            'dob': None,
+            'sex': None,
+            'physician': None,
+            'sample_id': None,
+            'results': [],
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Process each frame to extract information
+        for frame in self.current_message_frames:
+            try:
+                # Parse the record type and fields
+                fields = frame.split('|')
+                if not fields or len(fields[0]) < 1:
+                    continue
+                
+                record_type = fields[0][-1] if fields[0][-1].isalpha() else None
+                
+                # Extract patient info from Patient (P) record
+                if record_type == 'P':
+                    self._extract_patient_info(fields, message_info)
+                
+                # Extract test info from Result (R) records
+                elif record_type == 'R':
+                    self._extract_result_info(fields, message_info)
+            
+            except Exception as e:
+                self.log_error(f"Error extracting info from frame: {e}")
+                continue
+        
+        return message_info
+    
+    def _extract_patient_info(self, fields: List[str], message_info: Dict[str, Any]):
+        """Extract patient information from P record fields"""
+        try:
+            # Get field positions from configuration
+            patient_id_pos = self.field_positions["patient_id"]
+            sample_id_pos = self.field_positions["sample_id"]
+            name_pos = self.field_positions["patient_name"]
+            dob_pos = self.field_positions["date_of_birth"]
+            sex_pos = self.field_positions["sex"]
+            physician_pos = self.field_positions["physician"]
+            
+            # Extract patient ID
+            if len(fields) > patient_id_pos and fields[patient_id_pos]:
+                message_info['patient_id'] = fields[patient_id_pos].strip()
+            
+            # Extract sample ID
+            if len(fields) > sample_id_pos and fields[sample_id_pos]:
+                message_info['sample_id'] = fields[sample_id_pos].strip()
+            # If sample ID is not available, use patient ID as fallback
+            if not message_info['sample_id'] and message_info['patient_id']:
+                message_info['sample_id'] = message_info['patient_id']
+            
+            # Extract name - handle different ASTM name formats
+            if len(fields) > name_pos and fields[name_pos]:
+                name_parts = fields[name_pos].split('^')
+                
+                # Log name parts for debugging
+                self.log_info(f"Name parts: {name_parts}")
+                
+                if self.analyzer_type in ["SYSMEX XN-L", "SYSMEX XN-550"]:
+                    # SYSMEX format: ^LASTNAME^FIRSTNAME
+                    if len(name_parts) >= 3:
+                        patient_name = f"{name_parts[2]} {name_parts[1]}".strip()
+                        if patient_name:
+                            message_info['patient_name'] = patient_name
+                    elif len(name_parts) == 2:
+                        # Fallback if format is unexpected
+                        patient_name = f"{name_parts[1]}".strip()
+                        if patient_name:
+                            message_info['patient_name'] = patient_name
+                    else:
+                        # Just use what we have
+                        message_info['patient_name'] = fields[name_pos].strip()
+                else:
+                    # Generic handling for other analyzers
+                    if len(name_parts) >= 3:
+                        # Format: ^LASTNAME^FIRSTNAME or FIRSTNAME^LASTNAME^SUFFIX
+                        patient_name = f"{name_parts[2]} {name_parts[1]}".strip()
+                        if patient_name:
+                            message_info['patient_name'] = patient_name
+                    elif len(name_parts) == 2:
+                        # Format: LASTNAME^FIRSTNAME
+                        patient_name = f"{name_parts[1]} {name_parts[0]}".strip()
+                        if patient_name:
+                            message_info['patient_name'] = patient_name
+                    else:
+                        # Just use what we have
+                        message_info['patient_name'] = fields[name_pos].strip()
+            
+            # Extract DOB in YYYYMMDD format
+            if len(fields) > dob_pos and fields[dob_pos]:
+                dob = fields[dob_pos].strip()
+                if len(dob) == 8 and dob.isdigit():
+                    # Format as YYYY-MM-DD
+                    try:
+                        message_info['dob'] = f"{dob[0:4]}-{dob[4:6]}-{dob[6:8]}"
+                    except Exception:
+                        message_info['dob'] = dob
+                else:
+                    message_info['dob'] = dob
+            
+            # Extract sex
+            if len(fields) > sex_pos and fields[sex_pos]:
+                sex = fields[sex_pos].strip().upper()
+                if sex in ['M', 'F', 'U', 'O']:
+                    message_info['sex'] = sex
+                else:
+                    message_info['sex'] = 'U'  # Unknown
+            
+            # Extract physician
+            if len(fields) > physician_pos and fields[physician_pos]:
+                message_info['physician'] = fields[physician_pos].strip()
+            
+            self.log_info(f"Extracted patient info: {json.dumps({k: v for k, v in message_info.items() if k != 'results'})}")
+            
+        except Exception as e:
+            import traceback
+            self.log_error(f"Error extracting patient info: {e}\n{traceback.format_exc()}")
+    
+    def _extract_result_info(self, fields: List[str], message_info: Dict[str, Any]):
+        """Extract test results from R record fields"""
+        try:
+            # Get field positions from configuration
+            seq_pos = self.field_positions["result_sequence"]
+            test_code_pos = self.field_positions["result_test_code"]
+            value_pos = self.field_positions["result_value"]
+            unit_pos = self.field_positions["result_unit"]
+            flag_pos = self.field_positions["result_flag"]
+            
+            # Create a result object
+            result = {
+                'test_code': None,
+                'value': None,
+                'unit': None,
+                'flags': None,
+                'sequence': fields[seq_pos] if len(fields) > seq_pos else "0"
+            }
+            
+            # Extract test code using the configured pattern
+            if len(fields) > test_code_pos:
+                test_code_complex = fields[test_code_pos]
+                test_code_match = re.search(self.test_code_pattern, test_code_complex)
+                if test_code_match:
+                    result['test_code'] = test_code_match.group(1)
+                else:
+                    result['test_code'] = test_code_complex.strip()
+            
+            # Extract value, unit and flags
+            if len(fields) > value_pos:
+                result['value'] = fields[value_pos].strip()
+            
+            if len(fields) > unit_pos:
+                result['unit'] = fields[unit_pos].strip()
+            
+            if len(fields) > flag_pos:
+                result['flags'] = fields[flag_pos].strip()
+            
+            # Add to results array
+            message_info['results'].append(result)
+            
+            self.log_info(f"Extracted result: {json.dumps(result)}")
+            
+        except Exception as e:
+            self.log_error(f"Error extracting result info: {e}")
+    
+    def _background_process_message(self, message_info: Dict[str, Any]):
+        """Process the complete message in a background thread"""
+        try:
+            self.log_info(f"Background thread: Processing message for patient {message_info['patient_id']}")
+            
+            # Skip processing if no patient ID found
+            if not message_info['patient_id']:
+                self.log_warning("No patient ID found in message - skipping processing")
+                return
+            
+            # 1. First, store the patient in the database
+            try:
+                patient_db_id = self.db_manager.add_patient(
+                    message_info['patient_id'],
+                    message_info['patient_name'],
+                    message_info['dob'],
+                    message_info['sex'],
+                    message_info['physician'],
+                    message_info['raw_payload'],
+                    message_info['sample_id']
+                )
+                
+                self.log_info(f"Patient stored with DB ID: {patient_db_id}")
+                
+                # Update UI if callback exists
+                if self.gui_callback and hasattr(self.gui_callback, 'update_patient_info'):
+                    # Add database ID to the info
+                    patient_info = {
+                        'db_id': patient_db_id,
+                        'patient_id': message_info['patient_id'],
+                        'patient_name': message_info['patient_name'],
+                        'date_of_birth': message_info['dob'],
+                        'sex': message_info['sex'],
+                        'physician': message_info['physician'],
+                        'sample_id': message_info['sample_id']
+                    }
+                    
+                    # Use call_soon_threadsafe for thread safety
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        
+                    loop.call_soon_threadsafe(
+                        lambda: self.gui_callback.update_patient_info(patient_info)
+                    )
+            
+            except Exception as e:
+                self.log_error(f"Error adding patient to database: {e}")
+                return
+            
+            # 2. Process and store each result
+            results_processed = 0
+            for result in message_info['results']:
                 try:
-                    self.db_manager.add_result(
-                        self.current_patient_id,
+                    # Convert value to float if possible
+                    try:
+                        value_float = float(result['value'])
+                    except (ValueError, TypeError):
+                        value_float = None
+                    
+                    # Add result to database
+                    result_id = self.db_manager.add_result(
+                        patient_db_id,
                         result['test_code'],
-                        result['value'],
+                        value_float if value_float is not None else result['value'],
                         result['unit'],
                         result['flags'],
-                        None,
-                        result.get('sequence', '0')
+                        None,  # Use default timestamp
+                        result['sequence']
+                    )
+                    
+                    if result_id:
+                        results_processed += 1
+                        self.log_info(f"Result stored: {result['test_code']} = {result['value']} {result['unit']}")
+                    
+                except Exception as e:
+                    self.log_error(f"Error storing result: {e}")
+            
+            self.log_info(f"Processed {results_processed} of {len(message_info['results'])} results")
+            
+            # 3. Try to sync the patient if sync manager is available
+            if hasattr(self, 'sync_manager') and self.sync_manager and patient_db_id:
+                try:
+                    # Create a new event loop for this thread
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    # Run the sync operation
+                    loop.run_until_complete(self.sync_manager.sync_patient_realtime(patient_db_id))
+                    loop.close()
+                    
+                    self.log_info(f"Patient {message_info['patient_id']} synced successfully")
+                    
+                except Exception as e:
+                    self.log_error(f"Error syncing patient: {e}")
+            
+            # 4. Update the UI to show new results
+            if self.gui_callback and hasattr(self.gui_callback, 'update_results'):
+                try:
+                    # Use call_soon_threadsafe for thread safety
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        
+                    loop.call_soon_threadsafe(
+                        lambda: self.gui_callback.update_results()
                     )
                 except Exception as e:
-                    self.log_error(f"Error processing pending result: {e}")
+                    self.log_error(f"Error updating UI with results: {e}")
             
-            self.pending_results = []
-            
-            # Reset current patient ID after processing everything
-            self.current_patient_id = None
-            
-        # Reset sequence number for next message
-        self.sequence_number = 0
+        except Exception as e:
+            import traceback
+            self.log_error(f"Error in background processing: {e}\n{traceback.format_exc()}")
     
-    async def process_scattergram(self, data: bytes):
+    def get_message_info(self, raw_payload: str) -> Dict[str, Any]:
         """
-        Process scattergram data from analyzers like SYSMEX XN-L
+        Parse a raw ASTM payload into patient and result information
+        
+        This method can be called externally by the TCP server to parse
+        a complete ASTM message payload.
+        
+        Args:
+            raw_payload: The raw ASTM message payload as a string
+            
+        Returns:
+            Dictionary containing patient information and test results
+        """
+        # Split the payload into frames
+        frames = raw_payload.strip().split('\n')
+        
+        # Store frames temporarily 
+        self.current_message_frames = frames
+        
+        # Extract and return information
+        message_info = self._extract_message_info()
+        
+        # Add the raw payload to the message info
+        message_info['raw_payload'] = raw_payload
+        
+        return message_info
+    
+    def process_scattergram(self, data: bytes):
+        """
+        Process scattergram data from analyzers (e.g., SYSMEX XN-L)
         
         Args:
             data: Compressed scattergram data
         """
-        self.log_info(f"Received scattergram data: {len(data)} bytes")
-        
         try:
-            # Decompress the scattergram data
+            self.log_info(f"Processing scattergram data: {len(data)} bytes")
+            
+            # Decompress and process the scattergram data
             scattergram = self.scattergram_decoder.decompress(data)
             
-            # If GUI callback is available, update the display
+            # Update UI if callback exists
             if self.gui_callback and hasattr(self.gui_callback, 'update_scattergram'):
-                # Schedule the GUI update in the main thread
-                asyncio.get_event_loop().call_soon_threadsafe(
-                    self.gui_callback.update_scattergram,
-                    scattergram
-                )
-                # Show the scattergram frame if it's hidden
-                asyncio.get_event_loop().call_soon_threadsafe(
-                    self.gui_callback._show_scattergram
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    
+                loop.call_soon_threadsafe(
+                    lambda: self.gui_callback.update_scattergram(scattergram)
                 )
                 
-            self.log_info("Scattergram processed successfully")
+                # Show the scattergram frame if it exists
+                if hasattr(self.gui_callback, '_show_scattergram'):
+                    loop.call_soon_threadsafe(
+                        lambda: self.gui_callback._show_scattergram()
+                    )
+                
+            return True
             
         except Exception as e:
             self.log_error(f"Error processing scattergram: {e}")
+            return False
