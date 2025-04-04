@@ -249,7 +249,7 @@ class ASTMParser(BaseParser):
             'timestamp': datetime.now().isoformat()
         }
         
-        # Process each frame to extract information
+        # First pass: Process each frame to extract patient info and result info
         for frame in self.current_message_frames:
             try:
                 # Parse the record type and fields
@@ -271,6 +271,19 @@ class ASTMParser(BaseParser):
                 self.log_error(f"Error extracting info from frame: {e}")
                 continue
         
+        # Second pass: If patient_id is still None, try to get it from O record
+        if not message_info['patient_id']:
+            self.log_info("No patient ID found in P record, checking O record")
+            for frame in self.current_message_frames:
+                fields = frame.split('|')
+                if not fields or len(fields[0]) < 1:
+                    continue
+                
+                record_type = fields[0][-1] if fields[0][-1].isalpha() else None
+                
+                if record_type == 'O':
+                    self._extract_patient_id_from_order(fields, message_info)
+
         return message_info
     
     def _extract_patient_info(self, fields: List[str], message_info: Dict[str, Any]):
@@ -407,6 +420,57 @@ class ASTMParser(BaseParser):
             
         except Exception as e:
             self.log_error(f"Error extracting result info: {e}")
+    
+    def _extract_patient_id_from_order(self, fields: List[str], message_info: Dict[str, Any]):
+        """
+        Extract patient ID from O record fields when it's not found in the P record
+        
+        Format examples:
+        - "^^                475371^M" (patient ID is 475371)
+        - Other ASTM O record formats with patient ID embedded
+        """
+        try:
+            # First, try standard field that often contains patient ID in O records
+            # This is typically field 4 in O records (index 3)
+            if len(fields) > 3 and fields[3]:
+                # Parse the complex field value to extract the patient ID
+                # Common format: ^^                PATIENT_ID^X
+                order_field = fields[3].strip()
+                
+                # Log the raw field for debugging
+                self.log_info(f"Attempting to extract patient ID from O record field: '{order_field}'")
+                
+                # Try to extract using regex - looking for numeric ID typically after spaces or ^ characters
+                patient_id_match = re.search(r'\^+\s*(\d+)', order_field)
+                if patient_id_match:
+                    patient_id = patient_id_match.group(1).strip()
+                    if patient_id:
+                        message_info['patient_id'] = patient_id
+                        self.log_info(f"Extracted patient ID from O record: {patient_id}")
+                        return
+                
+                # Try alternative approach - split by ^ and find a numeric component
+                parts = order_field.split('^')
+                for part in parts:
+                    part = part.strip()
+                    if part and part.isdigit():
+                        message_info['patient_id'] = part
+                        self.log_info(f"Extracted patient ID from O record (alternative method): {part}")
+                        return
+            
+            # If the above methods don't work, try the same field position as in P records
+            patient_id_pos = self.field_positions["patient_id"]
+            if len(fields) > patient_id_pos and fields[patient_id_pos]:
+                patient_id = fields[patient_id_pos].strip()
+                if patient_id:
+                    message_info['patient_id'] = patient_id
+                    self.log_info(f"Extracted patient ID from O record standard position: {patient_id}")
+                    return
+                    
+        except Exception as e:
+            self.log_error(f"Error extracting patient ID from O record: {e}")
+            import traceback
+            self.log_error(traceback.format_exc())
     
     def _background_process_message(self, message_info: Dict[str, Any]):
         """Process the complete message in a background thread"""
