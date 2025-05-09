@@ -32,22 +32,22 @@ async def setup_application():
     sync_manager = None
     app = None
     root = None
-    
+
     try:
         config = Config()
         logger = Logger(name=config.get("app_name", "LabSync"))
         db_manager = DatabaseManager()
-        
+
         # Create Tkinter root window
         root = tk.Tk()
-        
+
         # Create event loop for the application
         loop = asyncio.get_event_loop()
-        
+
         # Initialize network components but don't start them yet
         sync_manager = SyncManager(config, db_manager, logger)
         tcp_server = TCPServer(config, db_manager, logger=logger, sync_manager=sync_manager)
-        
+
         # Create GUI with all components
         app = ApplicationWindow(
             root=root,
@@ -58,37 +58,37 @@ async def setup_application():
             logger=logger,
             loop=loop
         )
-        
+
         # Attach GUI callback to server after creation
         tcp_server.gui_callback = app
-        
+
         return root, config, logger, db_manager, tcp_server, sync_manager, app, loop
-        
+
     except Exception as e:
         # Clean up any created resources on error
         if logger:
             logger.error(f"Error during application setup: {e}")
-        
+
         # Clean up in reverse order of creation
         if app and root:
             try:
                 root.destroy()
             except:
                 pass
-                
+
         if tcp_server:
             try:
                 if loop and loop.is_running():
                     loop.run_until_complete(tcp_server.stop())
             except:
                 pass
-                
+
         if db_manager:
             try:
                 db_manager.close()
             except:
                 pass
-        
+
         raise  # Re-raise the exception after cleanup
 
 def periodic_gui_update(app, root):
@@ -108,18 +108,18 @@ def main():
         # Set event loop policy for Windows
         if sys.platform == 'win32':
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
+
         # Initialize event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         # Initialize all components
         root, config, logger, db_manager, tcp_server, sync_manager, app, app_loop = \
             loop.run_until_complete(setup_application())
-        
+
         # Add watchdog timer to detect freezes
         last_update_time = [time.time()]  # Use list for nonlocal access in nested function
-        
+
         def check_alive():
             current_time = time.time()
             if current_time - last_update_time[0] > 10:  # Over 10 seconds without update
@@ -132,20 +132,20 @@ def main():
             last_update_time[0] = current_time
             if root.winfo_exists():
                 root.after(5000, check_alive)
-        
+
         # Start watchdog after a short delay
         root.after(5000, check_alive)
-        
+
         # Update function that resets the watchdog timer
         original_update = app.update_results
         def wrapped_update_results():
             last_update_time[0] = time.time()  # Reset watchdog timer
             return original_update()
         app.update_results = wrapped_update_results
-        
+
         # Schedule first GUI update
         root.after(1000, lambda: periodic_gui_update(app, root))
-        
+
         # Start Tkinter main loop
         try:
             root.mainloop()
@@ -163,7 +163,7 @@ def main():
                         pass
             except Exception as cleanup_error:
                 logger.error(f"Error during task cleanup: {cleanup_error}")
-            
+
     except Exception as e:
         print(f"Fatal error: {e}")
         if 'logger' in locals():

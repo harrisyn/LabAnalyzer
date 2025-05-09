@@ -7,17 +7,18 @@
     "auto_start": false,
     "external_server": {
         "enabled": true,
-        "url": "https://api.example.com/data",
+        "url": "https://webhook.site/b1b38bef-b5c4-4eca-a109-efd3d341ce42",
         "api_key": "4389834943",
-        "sync_frequency": "realtime",
+        "sync_frequency": "cron",
         "cron_schedule": "0 * * * *",
         "scheduled_hour": "0",
         "scheduled_minute": "0",
-        "cron_expression": "0 2 * * *",
+        "cron_expression": "* * * * *",
         "retry_interval": 60,
-        "endpoint_path": "/api/results",
+        "endpoint_path": "",
         "http_method": "POST",
-        "auth_method": "api_key",
-        "api_key_header": "X-API-Key"
+        "auth_method": "none",
+        "api_key_header": "X-API-Key",
+        "bearer_token": ""
     }
 }
