@@ -28,6 +28,7 @@ jobs:
           pyinstaller --name "LabSync" --windowed --onefile --add-data "src/gui/resources;gui/resources" src/main.py
           echo "Contents of dist after PyInstaller:"
           Get-ChildItem -Path dist -Recurse | Format-Table FullName
+
       - name: Create Windows Installer
         run: |
           choco install innosetup -y
@@ -35,11 +36,11 @@ jobs:
           iscc "installer/windows/installer.iss"
           echo "Contents of dist after Inno Setup:"
           Get-ChildItem -Path dist -Recurse | Format-Table FullName
-          if not exist "dist\LabSync-Setup.exe" (
-            echo "Error: Installer dist\LabSync-Setup.exe not found!"
-            exit 1
-          )
-          
+          if (-not (Test-Path "dist\LabSync-Setup.exe")) {
+              echo "Error: Installer dist\LabSync-Setup.exe not found!"
+              exit 1
+          }
+
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
