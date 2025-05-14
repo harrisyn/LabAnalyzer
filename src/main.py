@@ -17,6 +17,7 @@ if __package__ is None:
     sys.path.insert(0, package_root)
     from src.utils.config import Config
     from src.utils.logger import Logger
+    from src.utils.updater import UpdateChecker
     from src.database.db_manager import DatabaseManager
     from src.network.tcp_server import TCPServer
     from src.network.sync_manager import SyncManager
@@ -25,6 +26,7 @@ else:
     # Use relative imports when running as a package
     from .utils.config import Config
     from .utils.logger import Logger
+    from .utils.updater import UpdateChecker
     from .database.db_manager import DatabaseManager
     from .network.tcp_server import TCPServer
     from .network.sync_manager import SyncManager
@@ -46,6 +48,12 @@ async def setup_application():
     try:
         config = Config()
         logger = Logger(name=config.get("app_name", "LabSync"))
+        
+        # Initialize update checker
+        updater = UpdateChecker(current_version=config.get("version", "1.0.0"))
+        # Start update check in background
+        asyncio.create_task(updater.check_updates_periodically())
+
         db_manager = DatabaseManager()
 
         # Create Tkinter root window

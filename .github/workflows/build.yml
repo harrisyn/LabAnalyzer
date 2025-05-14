@@ -37,6 +37,7 @@ jobs:
             --hidden-import src.network `
             --hidden-import src.gui `
             --hidden-import src.protocols `
+            --icon "src/gui/resources/icon.ico" `
             src/main.py
           echo "Contents of dist after PyInstaller:"
           Get-ChildItem -Path dist -Recurse | Format-Table FullName

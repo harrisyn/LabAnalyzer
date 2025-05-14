@@ -1,0 +1,101 @@
+"""
+Handles automatic updates for the LabSync application
+"""
+import os
+import sys
+import json
+import urllib.request
+import subprocess
+from pathlib import Path
+import tkinter as tk
+from tkinter import messagebox
+import asyncio
+import aiohttp
+
+class UpdateChecker:
+    def __init__(self, current_version="1.0.0"):
+        self.current_version = current_version
+        # GitHub releases API URL - replace with your repository
+        self.update_url = "https://api.github.com/repos/harrisyn/basicAnalyzer/releases/latest"
+        self.temp_dir = Path(os.getenv('LOCALAPPDATA')) / "LabSync" / "Updates"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self._headers = {'Accept': 'application/vnd.github.v3+json'}
+
+    async def check_for_updates(self):
+        """Check GitHub releases for newer version"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.update_url, headers=self._headers) as response:
+                    if response.status != 200:
+                        return
+                    
+                    data = await response.json()
+                    latest_version = data['tag_name'].lstrip('v')
+                    
+                    if self._compare_versions(latest_version, self.current_version) > 0:
+                        windows_asset = next(
+                            (asset for asset in data['assets'] 
+                             if asset['name'].endswith('.exe')), None
+                        )
+                        
+                        if windows_asset and await self._prompt_update(latest_version):
+                            await self._download_and_install(windows_asset['browser_download_url'])
+
+        except Exception as e:
+            print(f"Update check failed: {e}")
+
+    def _compare_versions(self, version1, version2):
+        """Compare two version strings"""
+        v1_parts = [int(x) for x in version1.split('.')]
+        v2_parts = [int(x) for x in version2.split('.')]
+        
+        for i in range(max(len(v1_parts), len(v2_parts))):
+            v1 = v1_parts[i] if i < len(v1_parts) else 0
+            v2 = v2_parts[i] if i < len(v2_parts) else 0
+            if v1 > v2:
+                return 1
+            if v1 < v2:
+                return -1
+        return 0
+
+    async def _prompt_update(self, new_version):
+        """Show update prompt to user"""
+        return messagebox.askyesno(
+            "Update Available",
+            f"Version {new_version} is available. Would you like to update now?"
+        )
+
+    async def _download_and_install(self, download_url):
+        """Download and install the new version"""
+        try:
+            installer_path = self.temp_dir / "LabSync-Setup.exe"
+            
+            # Download with progress
+            async with aiohttp.ClientSession() as session:
+                async with session.get(download_url) as response:
+                    if response.status != 200:
+                        raise Exception(f"Download failed with status {response.status}")
+                    
+                    with open(installer_path, 'wb') as f:
+                        f.write(await response.read())
+
+            # Create update batch script
+            batch_path = self.temp_dir / "update.bat"
+            with open(batch_path, 'w') as f:
+                f.write('@echo off\n')
+                f.write('ping 127.0.0.1 -n 3 > nul\n')  # Wait for main app to close
+                f.write(f'start "" /wait "{installer_path}" /VERYSILENT /NORESTART\n')
+                f.write('del "%~f0"\n')  # Self-delete batch file
+
+            # Launch updater and exit current instance
+            subprocess.Popen([str(batch_path)], shell=True)
+            sys.exit(0)
+
+        except Exception as e:
+            messagebox.showerror("Update Error", f"Failed to update: {e}")
+
+    async def check_updates_periodically(self, interval_hours=24):
+        """Check for updates periodically"""
+        while True:
+            await self.check_for_updates()
+            await asyncio.sleep(interval_hours * 3600)  # Convert hours to seconds
