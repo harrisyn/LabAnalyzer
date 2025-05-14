@@ -10,15 +10,25 @@ import nest_asyncio
 import threading
 import time
 
-# Add src directory to Python path for module imports
-sys.path.append(str(Path(os.path.dirname(os.path.abspath(__file__))).parent))
-
-from src.utils.config import Config
-from src.utils.logger import Logger
-from src.database.db_manager import DatabaseManager
-from src.network.tcp_server import TCPServer
-from src.network.sync_manager import SyncManager
-from src.gui.app_window import ApplicationWindow
+# Handle imports for both direct execution and packaged execution
+if __package__ is None:
+    # Add parent directory to Python path for direct script execution
+    package_root = str(Path(__file__).resolve().parent.parent)
+    sys.path.insert(0, package_root)
+    from src.utils.config import Config
+    from src.utils.logger import Logger
+    from src.database.db_manager import DatabaseManager
+    from src.network.tcp_server import TCPServer
+    from src.network.sync_manager import SyncManager
+    from src.gui.app_window import ApplicationWindow
+else:
+    # Use relative imports when running as a package
+    from .utils.config import Config
+    from .utils.logger import Logger
+    from .database.db_manager import DatabaseManager
+    from .network.tcp_server import TCPServer
+    from .network.sync_manager import SyncManager
+    from .gui.app_window import ApplicationWindow
 
 # Enable nested event loops
 nest_asyncio.apply()

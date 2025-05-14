@@ -25,7 +25,19 @@ jobs:
           
       - name: Build Windows executable
         run: |
-          pyinstaller --name "LabSync" --windowed --onefile --add-data "src/gui/resources;gui/resources" src/main.py
+          # Add the repository root to PYTHONPATH
+          $env:PYTHONPATH = "$PWD"
+          pyinstaller --name "LabSync" `
+            --windowed `
+            --onefile `
+            --add-data "src/gui/resources;gui/resources" `
+            --paths "." `
+            --hidden-import src.utils `
+            --hidden-import src.database `
+            --hidden-import src.network `
+            --hidden-import src.gui `
+            --hidden-import src.protocols `
+            src/main.py
           echo "Contents of dist after PyInstaller:"
           Get-ChildItem -Path dist -Recurse | Format-Table FullName
 
