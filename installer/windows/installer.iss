@@ -4,9 +4,14 @@
 #define AppVersion "1.0.0"
 #endif
 
+#define VersionNumbers GetEnv("APP_VERSION")
+#ifndef VersionNumbers
+#define VersionNumbers "1.0.0.0"
+#endif
+
 AppName=LabSync
 AppVersion={#AppVersion}
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#VersionNumbers}
 DefaultDirName={pf}\LabSync
 DefaultGroupName=LabSync
 OutputDir=..\..\dist

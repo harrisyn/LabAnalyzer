@@ -45,12 +45,17 @@ jobs:
       - name: Create Windows Installer
         run: |
           choco install innosetup -y
-          echo "Running Inno Setup Compiler..."
-          iscc "installer/windows/installer.iss"
+          echo "Running Inno Setup Compiler with version: $env:APP_VERSION"
+          # Add .0 to version if it's not in x.x.x.x format
+          $VERSION_INFO = $env:APP_VERSION
+          if ($VERSION_INFO -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+              $VERSION_INFO = "$env:APP_VERSION.0"
+          }
+          iscc "/DAppVersion=$env:APP_VERSION" "/DVersionNumbers=$VERSION_INFO" "installer/windows/installer.iss"
           echo "Contents of dist after Inno Setup:"
           Get-ChildItem -Path dist -Recurse | Format-Table FullName
-          if (-not (Test-Path "dist\LabSync-Setup.exe")) {
-              echo "Error: Installer dist\LabSync-Setup.exe not found!"
+          if (-not (Test-Path "dist\LabSync-Setup-$env:APP_VERSION.exe")) {
+              echo "Error: Installer dist\LabSync-Setup-$env:APP_VERSION.exe not found!"
               exit 1
           }
 
