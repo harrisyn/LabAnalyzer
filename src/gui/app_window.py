@@ -1235,25 +1235,92 @@ class ApplicationWindow:
                 if sync_status != "synced" and self.config.get("external_server", {}).get("enabled", False):
                     tags.append("sync")
                 self.patient_tree.item(item_id, tags=tuple(tags))
-                
         except Exception as e:
             self.logger.error(f"Error applying filters: {e}")
             messagebox.showerror("Error", f"Failed to apply filters: {str(e)}")
 
+    def _get_icon_paths(self):
+        """Get possible icon file paths for both development and packaged environments"""
+        import sys
+        
+        # Base paths to try
+        base_paths = []
+        
+        # For PyInstaller packaged app
+        if getattr(sys, 'frozen', False):
+            # Running in a PyInstaller bundle
+            bundle_dir = os.path.dirname(sys.executable)
+            base_paths.extend([
+                bundle_dir,  # Icon files copied to root
+                os.path.join(bundle_dir, 'gui', 'resources'),
+                os.path.join(bundle_dir, 'src', 'gui', 'resources'),
+                os.path.join(bundle_dir, '_internal'),  # PyInstaller internal folder
+                os.path.join(bundle_dir, '_internal', 'gui', 'resources'),
+                os.path.join(bundle_dir, '_internal', 'src', 'gui', 'resources'),
+            ])
+            # Also try sys._MEIPASS which is the PyInstaller temp folder
+            if hasattr(sys, '_MEIPASS'):
+                meipass = sys._MEIPASS
+                base_paths.extend([
+                    meipass,
+                    os.path.join(meipass, 'gui', 'resources'),
+                    os.path.join(meipass, 'src', 'gui', 'resources'),
+                ])
+        
+        # For development environment
+        current_dir = os.path.dirname(__file__)
+        base_paths.extend([
+            os.path.join(current_dir, "resources"),
+            os.path.join(os.path.dirname(current_dir), "gui", "resources"),
+            os.path.join(os.path.dirname(os.path.dirname(current_dir)), "gui", "resources"),
+        ])
+        
+        # Add absolute path from project root
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        base_paths.append(os.path.join(project_root, "src", "gui", "resources"))
+        
+        # Generate full icon paths
+        icon_paths = []
+        icon_files = ["icon.ico", "icon.png"]
+        
+        for base_path in base_paths:
+            for icon_file in icon_files:
+                icon_path = os.path.join(base_path, icon_file)
+                if icon_path not in icon_paths:  # Avoid duplicates
+                    icon_paths.append(icon_path)
+        
+        # Log the paths being checked for debugging
+        if hasattr(self, 'logger'):
+            self.logger.debug(f"Checking icon paths: {icon_paths}")
+        
+        return icon_paths
+
     def _init_system_tray(self):
         """Initialize system tray icon and menu"""
         try:
-            # Load icon for system tray
-            icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.png")
-            if not os.path.exists(icon_path):
-                # Fallback to ico file
-                icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.ico")
+            # Load icon for system tray - try multiple paths and formats
+            icon_paths = self._get_icon_paths()
             
-            if os.path.exists(icon_path):
-                self.tray_image = Image.open(icon_path)
-            else:
+            self.tray_image = None
+            for icon_path in icon_paths:
+                if os.path.exists(icon_path):
+                    try:
+                        self.tray_image = Image.open(icon_path)
+                        # Convert to RGBA if needed for better compatibility
+                        if self.tray_image.mode != 'RGBA':
+                            self.tray_image = self.tray_image.convert('RGBA')
+                        # Resize to standard tray icon size
+                        self.tray_image = self.tray_image.resize((32, 32), Image.Resampling.LANCZOS)
+                        # self.logger.info(f"Loaded tray icon from: {icon_path}")
+                        break
+                    except Exception as e:
+                        # self.logger.warning(f"Failed to load icon from {icon_path}: {e}")
+                        continue
+            
+            if self.tray_image is None:
                 # Create a simple default icon if no file exists
-                self.tray_image = Image.new('RGB', (64, 64), color='blue')
+                self.tray_image = Image.new('RGBA', (32, 32), color=(0, 120, 215, 255))  # Windows blue
+                # self.logger.warning("Using default tray icon - no icon file found")
             
             # Create system tray menu
             self.tray_menu = pystray.Menu(

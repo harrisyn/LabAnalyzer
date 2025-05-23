@@ -30,7 +30,9 @@ jobs:
           pyinstaller --name "LabSync" `
             --windowed `
             --onefile `
-            --add-data "src/gui/resources;gui/resources" `
+            --add-data "src/gui/resources;src/gui/resources" `
+            --add-data "src/gui/resources/icon.ico;." `
+            --add-data "src/gui/resources/icon.png;." `
             --paths "." `
             --hidden-import src.utils `
             --hidden-import src.database `
