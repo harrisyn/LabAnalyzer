@@ -22,9 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-      release_id: ${{ steps.create_release.outputs.id }}
       tag_name: v${{ github.event.inputs.version }}
+      version: ${{ github.event.inputs.version }}
     steps:
       - uses: actions/checkout@v4
       
@@ -48,22 +47,53 @@ jobs:
           draft: false
           prerelease: false
 
+  set-release-info:
+    runs-on: ubuntu-latest
+    needs: [create-release]
+    if: always() && github.event_name == 'workflow_dispatch'
+    outputs:
+      version: ${{ needs.create-release.outputs.version }}
+      tag_name: ${{ needs.create-release.outputs.tag_name }}
+    steps:
+      - name: No-op step
+        run: echo "Setting release info from create-release job"
+
+  set-tag-from-event:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+      tag_name: ${{ steps.extract.outputs.tag_name }}
+    steps:
+      - id: extract
+        name: Extract tag information
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag_name=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted tag=$TAG, version=$VERSION"
+
   build-windows:
     runs-on: windows-latest
-    needs: [create-release]
-    if: always() && !cancelled()
+    needs: [set-release-info, set-tag-from-event]
+    if: always() && (needs.set-tag-from-event.result == 'success' || needs.set-release-info.result == 'success')
     steps:
       - uses: actions/checkout@v4
       
       - name: Set Version
         run: |
           if ("${{ github.event_name }}" -eq "release") {
-            $VERSION = "${{ github.ref }}".Replace('refs/tags/v', '')
+            $VERSION="${{ needs.set-tag-from-event.outputs.version }}"
+            $TAG="${{ needs.set-tag-from-event.outputs.tag_name }}"
           } else {
-            $VERSION = "${{ github.event.inputs.version }}"
+            $VERSION="${{ needs.set-release-info.outputs.version }}"
+            $TAG="${{ needs.set-release-info.outputs.tag_name }}"
           }
           echo "APP_VERSION=$VERSION" >> $env:GITHUB_ENV
+          echo "TAG_NAME=$TAG" >> $env:GITHUB_ENV
           echo "Version set to: $VERSION"
+          echo "Tag name set to: $TAG"
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -107,30 +137,33 @@ jobs:
           path: dist/LabSync-Setup-${{ env.APP_VERSION }}.exe
 
       - name: Upload Release Asset
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && needs.create-release.result == 'success')
         uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.event_name == 'release' && github.ref || needs.create-release.outputs.tag_name }}
+          tag_name: ${{ env.TAG_NAME }}
           files: ./dist/LabSync-Setup-${{ env.APP_VERSION }}.exe
+
   build-macos:
     runs-on: macos-latest
-    needs: [create-release]
-    if: always() && !cancelled()
+    needs: [set-release-info, set-tag-from-event]
+    if: always() && (needs.set-tag-from-event.result == 'success' || needs.set-release-info.result == 'success')
     steps:
       - uses: actions/checkout@v4
       
       - name: Set Version
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${{ github.ref }}"
-            VERSION="${VERSION#refs/tags/v}"
+            VERSION="${{ needs.set-tag-from-event.outputs.version }}"
+            TAG="${{ needs.set-tag-from-event.outputs.tag_name }}"
           else
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="${{ needs.set-release-info.outputs.version }}"
+            TAG="${{ needs.set-release-info.outputs.tag_name }}"
           fi
           echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG" >> $GITHUB_ENV
           echo "Version set to: $VERSION"
+          echo "Tag name set to: $TAG"
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -170,37 +203,39 @@ jobs:
           path: dist/LabSync-${{ env.APP_VERSION }}.dmg
 
       - name: Upload Release Asset
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && needs.create-release.result == 'success')
         uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.event_name == 'release' && github.ref || needs.create-release.outputs.tag_name }}
+          tag_name: ${{ env.TAG_NAME }}
           files: ./dist/LabSync-${{ env.APP_VERSION }}.dmg
+
   create-update-info:
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, set-release-info, set-tag-from-event]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && needs.create-release.result == 'success')
+    if: always() && (needs.set-tag-from-event.result == 'success' || needs.set-release-info.result == 'success')
     steps:
       - name: Set Version
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${{ github.ref }}"
-            VERSION="${VERSION#refs/tags/v}"
+            VERSION="${{ needs.set-tag-from-event.outputs.version }}"
+            TAG="${{ needs.set-tag-from-event.outputs.tag_name }}"
           else
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="${{ needs.set-release-info.outputs.version }}"
+            TAG="${{ needs.set-release-info.outputs.tag_name }}"
           fi
           echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG" >> $GITHUB_ENV
           
       - name: Create update config
         run: |
           cat > update_config.json << EOL
           {
             "latest_version": "${{ env.APP_VERSION }}",
-            "download_url": "https://github.com/${{ github.repository }}/releases/tag/v${{ env.APP_VERSION }}",
-            "windows_url": "https://github.com/${{ github.repository }}/releases/download/v${{ env.APP_VERSION }}/LabSync-Setup-${{ env.APP_VERSION }}.exe",
-            "macos_url": "https://github.com/${{ github.repository }}/releases/download/v${{ env.APP_VERSION }}/LabSync-${{ env.APP_VERSION }}.dmg",
-            "changelog_url": "https://github.com/${{ github.repository }}/releases/tag/v${{ env.APP_VERSION }}"
+            "download_url": "https://github.com/${{ github.repository }}/releases/tag/${{ env.TAG_NAME }}",
+            "windows_url": "https://github.com/${{ github.repository }}/releases/download/${{ env.TAG_NAME }}/LabSync-Setup-${{ env.APP_VERSION }}.exe",
+            "macos_url": "https://github.com/${{ github.repository }}/releases/download/${{ env.TAG_NAME }}/LabSync-${{ env.APP_VERSION }}.dmg",
+            "changelog_url": "https://github.com/${{ github.repository }}/releases/tag/${{ env.TAG_NAME }}"
           }
           EOL
 
@@ -209,5 +244,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.event_name == 'release' && github.ref || needs.create-release.outputs.tag_name }}
+          tag_name: ${{ env.TAG_NAME }}
           files: ./update_config.json

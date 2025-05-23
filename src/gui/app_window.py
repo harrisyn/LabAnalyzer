@@ -1370,8 +1370,8 @@ Features:
                     icon_paths.append(icon_path)
         
         # Log the paths being checked for debugging
-        if hasattr(self, 'logger'):
-            self.logger.debug(f"Checking icon paths: {icon_paths}")
+        # if hasattr(self, 'logger'):
+        #     self.logger.debug(f"Checking icon paths: {icon_paths}")
         
         return icon_paths
 
