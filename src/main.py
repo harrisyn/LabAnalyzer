@@ -44,18 +44,23 @@ async def setup_application():
     sync_manager = None
     app = None
     root = None
-
+    
     try:
         config = Config()
-        logger = Logger(name=config.get("app_name", "LabSync"))
+        logger = Logger(name=config.get("app_name", "LabSync"))        # Initialize core components
+        logger.info("Initializing core application components...")
         
-        # Initialize update checker
-        updater = UpdateChecker(current_version=config.get("version", "1.0.0"))
-        # Start update check in background
-        asyncio.create_task(updater.check_updates_periodically())
-
-        db_manager = DatabaseManager()
-
+        # Initialize database manager
+        try:
+            db_manager = DatabaseManager()
+            if not db_manager.initialized:
+                logger.error("Database manager failed to initialize properly")
+                raise RuntimeError("Database initialization failed")
+            logger.info("Database manager initialized successfully")
+        except Exception as e:
+            logger.error(f"Database initialization error: {str(e)}")
+            raise
+        
         # Create Tkinter root window
         root = tk.Tk()
 
@@ -76,6 +81,13 @@ async def setup_application():
             logger=logger,
             loop=loop
         )
+        
+        # Initialize update checker with reference to app window
+        updater = UpdateChecker(
+            current_version=config.get("version", "1.0.0"),
+            app_window=app
+        )        # Start update check in background
+        asyncio.create_task(updater.check_updates_periodically())
 
         # Attach GUI callback to server after creation
         tcp_server.gui_callback = app

@@ -8,14 +8,16 @@ import urllib.request
 import subprocess
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import asyncio
 import aiohttp
 import zipfile
+import time
 
 class UpdateChecker:
-    def __init__(self, current_version="1.0.0"):
+    def __init__(self, current_version="1.0.0", app_window=None):
         self.current_version = current_version
+        self.app_window = app_window  # Reference to main application window for clean shutdown
         # GitHub releases API URL - pointing to correct repository
         self.update_url = "https://api.github.com/repos/harrisyn/LabAnalyzer/releases/latest"
         self.temp_dir = Path(os.getenv('LOCALAPPDATA')) / "LabSync" / "Updates"
@@ -81,14 +83,14 @@ class UpdateChecker:
             if v1 < v2:
                 return -1
         return 0
-
+        
     async def _prompt_update(self, new_version):
         """Show update prompt to user"""
         return messagebox.askyesno(
             "Update Available",
             f"Version {new_version} is available. Would you like to update now?"
         )
-
+        
     async def _download_and_install(self, download_url):
         """Download and install the new version"""
         try:
@@ -96,14 +98,83 @@ class UpdateChecker:
             is_zip = download_url.endswith('.zip')
             download_path = self.temp_dir / ("installer.zip" if is_zip else "LabSync-Setup.exe")
             
-            # Download with progress
+            # Create progress dialog
+            progress_window = tk.Toplevel()
+            progress_window.title("Downloading Update")
+            progress_window.geometry("400x150")
+            progress_window.resizable(False, False)
+            progress_window.transient(tk._default_root)  # Make it stay on top of main window
+            progress_window.grab_set()  # Make it modal
+            
+            # Set window icon
+            try:
+                icon_path = os.path.join(os.path.dirname(__file__), "..", "gui", "resources", "icon.ico")
+                if os.path.exists(icon_path):
+                    progress_window.iconbitmap(icon_path)
+            except:
+                pass  # Ignore icon errors
+                
+            # Center the window
+            progress_window.update_idletasks()
+            width = progress_window.winfo_width()
+            height = progress_window.winfo_height()
+            x = (progress_window.winfo_screenwidth() // 2) - (width // 2)
+            y = (progress_window.winfo_screenheight() // 2) - (height // 2)
+            progress_window.geometry(f'{width}x{height}+{x}+{y}')
+            
+            # Create progress components
+            tk.Label(progress_window, text="Downloading update...", font=("Arial", 12)).pack(pady=(15, 5))
+            progress_var = tk.DoubleVar()
+            progress_bar = ttk.Progressbar(progress_window, variable=progress_var, maximum=100, length=350)
+            progress_bar.pack(pady=5, padx=25)
+            status_var = tk.StringVar(value="Starting download...")
+            status_label = tk.Label(progress_window, textvariable=status_var)
+            status_label.pack(pady=5)
+            
+            # Update the UI during download
+            def update_progress(percentage, message):
+                progress_var.set(percentage)
+                status_var.set(message)
+                progress_window.update()
+                
+            # Download with progress tracking
             async with aiohttp.ClientSession() as session:
                 async with session.get(download_url) as response:
                     if response.status != 200:
+                        progress_window.destroy()
                         raise Exception(f"Download failed with status {response.status}")
                     
-                    with open(download_path, 'wb') as f:
-                        f.write(await response.read())
+                    # Get total size for percentage calculation
+                    total_size = int(response.headers.get('Content-Length', 0))
+                    if total_size == 0:
+                        # If Content-Length is not provided, use indefinite progress
+                        update_progress(0, "Downloading... (size unknown)")
+                        with open(download_path, 'wb') as f:
+                            f.write(await response.read())
+                    else:
+                        # Download with progress updates
+                        chunk_size = 1024 * 8  # 8KB chunks
+                        downloaded = 0
+                        
+                        with open(download_path, 'wb') as f:
+                            async for chunk in response.content.iter_chunked(chunk_size):
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                percentage = min(100.0, downloaded * 100 / total_size)
+                                
+                                # Calculate download speed and ETA
+                                mb_downloaded = downloaded / (1024 * 1024)
+                                mb_total = total_size / (1024 * 1024)
+                                message = f"Downloaded: {mb_downloaded:.1f} MB of {mb_total:.1f} MB ({percentage:.1f}%)"
+                                
+                                # Update progress every ~20ms to avoid UI freezing
+                                update_progress(percentage, message)
+                    
+            # Update status before extraction
+            update_progress(100, "Download complete. Preparing installer...")
+            
+            # Close progress dialog
+            progress_window.destroy()
 
             # Handle zip extraction if needed
             if is_zip:
@@ -117,19 +188,85 @@ class UpdateChecker:
                 
                 installer_path = exe_files[0]  # Use the first .exe found
             else:
-                installer_path = download_path
-
-            # Create update batch script
+                installer_path = download_path            # Get the main application process ID
+            import psutil
+            app_pid = os.getpid()
+            app_exe = psutil.Process(app_pid).exe()
+            app_name = os.path.basename(app_exe)
+            
+            # Create update batch script with more robust application termination
             batch_path = self.temp_dir / "update.bat"
             with open(batch_path, 'w') as f:
                 f.write('@echo off\n')
-                f.write('ping 127.0.0.1 -n 3 > nul\n')  # Wait for main app to close
-                f.write(f'start "" /wait "{installer_path}" /VERYSILENT /NORESTART\n')
+                f.write('echo Waiting for application to close...\n')
+                
+                # Wait for the specific process ID to end
+                f.write(f'echo Waiting for process ID {app_pid} to end\n')
+                f.write(f'timeout /t 3 /nobreak > nul\n')
+                
+                # Force kill the process if it's still running (should not be needed)
+                f.write(f'taskkill /F /PID {app_pid} /T > nul 2>&1\n')
+                
+                # Just to be super safe, also close any lingering instances by name
+                f.write(f'taskkill /F /IM "{app_name}" /T > nul 2>&1\n')
+                
+                # Wait a bit more to ensure everything is closed
+                f.write('timeout /t 2 /nobreak > nul\n')
+                
+                # Run the installer with CLOSEAPPLICATIONS flag to make it force-close any running instances 
+                f.write(f'echo Installing update from {installer_path}...\n')
+                f.write(f'start "" /wait "{installer_path}" /VERYSILENT /NORESTART /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS\n')
+                
+                # Clean up
+                f.write('echo Update completed.\n')
                 f.write('del "%~f0"\n')  # Self-delete batch file
 
-            # Launch updater and exit current instance
-            subprocess.Popen([str(batch_path)], shell=True)
-            sys.exit(0)
+            # Display final message to user
+            messagebox.showinfo("Update Ready", 
+                                "The update has been downloaded and will now be installed. "
+                                "The application will close during installation.")
+                                  # Close all toplevel windows
+            for widget in tk._default_root.winfo_children():
+                if isinstance(widget, tk.Toplevel):
+                    widget.destroy()
+              # Get main application instance to call clean shutdown
+            main_app = self.app_window  # Use direct reference if provided in constructor
+            
+            # If no direct reference, try to find it
+            if not main_app:
+                for widget in tk._default_root.winfo_children():
+                    # Look for references to the main application window
+                    if hasattr(widget, '_nametowidget'):
+                        try:
+                            for frame in widget.winfo_children():
+                                # Try to find the app instance variable in the parent
+                                if hasattr(frame, 'master') and hasattr(frame.master, 'master'):
+                                    if hasattr(frame.master.master, 'quit_application'):
+                                        main_app = frame.master.master
+                                        break
+                        except:
+                            pass
+                        
+            # Launch updater as detached process
+            update_process = subprocess.Popen([str(batch_path)], shell=True, 
+                               creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS)
+                               
+            # Try to properly close via app method if available
+            if main_app and hasattr(main_app, 'quit_application'):
+                main_app.quit_application()
+            elif hasattr(tk, '_default_root') and tk._default_root:
+                # Fallback to direct quit/destroy
+                try:
+                    tk._default_root.quit()
+                    tk._default_root.destroy()
+                except:
+                    pass
+                    
+            # Give a short delay for clean shutdown
+            time.sleep(0.5)
+                
+            # Exit the application forcefully as final resort
+            os._exit(0)
 
         except Exception as e:
             messagebox.showerror("Update Error", f"Failed to update: {e}")

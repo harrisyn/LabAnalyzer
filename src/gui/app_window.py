@@ -1080,48 +1080,102 @@ Features:
                     task.cancel()
                     try:
                         await task
-                    except asyncio.CancelledError:                        pass
-                        
+                    except asyncio.CancelledError:
+                        pass
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
-
-    def on_closing(self):
-        """Handle window closing"""
+            
+    def on_closing(self, force=False):
+        """Handle window closing
+        
+        Args:
+            force: If True, completely exit the application even if in-progress tasks exist
+        """
         try:
             # Set shutdown flag first
             self.is_shutting_down = True
             
+            # Log shutdown
+            self.logger.info("Application closing initiated")
+            
             # Stop system tray icon
             if hasattr(self, 'tray_icon') and self.tray_icon:
-                self.tray_icon.stop()
+                try:
+                    self.tray_icon.stop()
+                except:
+                    pass  # Ignore any errors stopping the tray icon
             
             # Remove logger callback
-            self.logger.remove_ui_callback(self._handle_log_message)
-
+            try:
+                self.logger.remove_ui_callback(self._handle_log_message)
+            except:
+                pass  # Ignore errors
+            
             # Create event loop for cleanup if needed
             try:
                 loop = asyncio.get_event_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                
+            # Run cleanup in the loop with timeout
+            try:
+                # Stop sync manager with timeout to prevent hanging
+                if self.sync_manager:
+                    task = asyncio.ensure_future(self.sync_manager.stop())
+                    loop.run_until_complete(asyncio.wait_for(task, timeout=3.0))
+            except (asyncio.TimeoutError, Exception) as e:
+                self.logger.warning(f"Sync manager shutdown timed out or failed: {e}")
             
-            # Run cleanup in the loop
-            if self.sync_manager:
-                loop.run_until_complete(self.sync_manager.stop())
-
             # Stop the server synchronously after sync manager
             if self.tcp_server and self.tcp_server.is_running:
-                self.tcp_server.stop_sync()
+                try:
+                    self.tcp_server.stop_sync()
+                except Exception as e:
+                    self.logger.warning(f"Error stopping TCP server: {e}")
             
             # Set destroyed flag
             self.is_destroyed = True
             
-            # Close the window
-            self.root.quit()
+            # Explicitly stop any running threads
+            import threading
+            for thread in threading.enumerate():
+                if thread is not threading.current_thread() and thread.daemon is False:
+                    self.logger.info(f"Non-daemon thread still running: {thread.name}")
             
+            # Close the window and destroy all child windows
+            for widget in list(self.root.children.values()):
+                if isinstance(widget, tk.Toplevel):
+                    try:
+                        widget.destroy()
+                    except:
+                        pass
+            
+            # Quit and destroy
+            try:
+                self.root.quit()
+                self.root.destroy()
+            except:
+                pass
+                
+            # Force exit if requested
+            if force:
+                self.logger.info("Forcing application exit")
+                import os
+                os._exit(0)
+                
         except Exception as e:
-            self.logger.error(f"Error during shutdown: {e}")
-            self.root.quit()  # Ensure window closes even if there's an error
+            self.logger.error(f"Error during shutdown: {str(e)}\n{traceback.format_exc()}")
+            try:
+                self.root.quit()
+                self.root.destroy()
+            except:
+                pass
+                
+            # Force exit if requested
+            if force:
+                import os
+                os._exit(0)
                 
     def _schedule_updates(self):
         """Schedule periodic GUI updates"""
@@ -1471,4 +1525,4 @@ Features:
 
     def quit_application(self, icon=None, item=None):
         """Actually quit the application"""
-        self.on_closing()
+        self.on_closing(force=True)
