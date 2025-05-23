@@ -67,7 +67,7 @@ def _show_about(self):
 
 ### For Developers:
 The update check will work once you:
-1. Create GitHub repository: `harrisyn/basicAnalyzer`
+1. Create GitHub repository: `harrisyn/LabAnalyzer`
 2. Create releases with Windows installer (.exe files)
 3. Tag releases with version numbers (e.g., `v1.0.1`)
 

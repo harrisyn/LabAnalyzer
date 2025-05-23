@@ -223,7 +223,7 @@ class SyncManager:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": f"BasicAnalyzer/{self.config.get('version', '1.0.0')}"
+            "User-Agent": f"LabSync/{self.config.get('version', '1.0.0')}"
         }
         
         # Add authentication based on config

@@ -9,7 +9,7 @@ import aiohttp
 
 async def test_github_api():
     """Test GitHub API connectivity"""
-    update_url = "https://api.github.com/repos/harrisyn/basicAnalyzer/releases/latest"
+    update_url = "https://api.github.com/repos/harrisyn/LabAnalyzer/releases/latest"
     headers = {'Accept': 'application/vnd.github.v3+json'}
     
     print("Testing GitHub API connectivity...")
@@ -28,7 +28,10 @@ async def test_github_api():
                     
                     # Check for Windows assets
                     assets = data.get('assets', [])
-                    windows_assets = [asset for asset in assets if asset['name'].endswith('.exe')]
+                    # Look for both .exe and windows .zip files
+                    windows_assets = [asset for asset in assets 
+                                    if asset['name'].endswith('.exe') or 
+                                    (asset['name'].startswith('windows') and asset['name'].endswith('.zip'))]
                     print(f"Windows installer assets: {len(windows_assets)}")
                     
                     for asset in windows_assets:

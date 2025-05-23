@@ -16,7 +16,7 @@ import zipfile
 class UpdateChecker:
     def __init__(self, current_version="1.0.0"):
         self.current_version = current_version
-        # GitHub releases API URL - pointing to correct repository
+        # GitHub releases API URL - replace with your repository
         self.update_url = "https://api.github.com/repos/harrisyn/LabAnalyzer/releases/latest"
         self.temp_dir = Path(os.getenv('LOCALAPPDATA')) / "LabSync" / "Updates"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -29,8 +29,7 @@ class UpdateChecker:
                 async with session.get(self.update_url, headers=self._headers) as response:
                     if response.status == 404:
                         # Repository not found - this is expected in development
-                        return False
-                    elif response.status != 200:
+                        return False                    elif response.status != 200:
                         raise Exception(f"GitHub API returned status {response.status}")
                     
                     data = await response.json()
