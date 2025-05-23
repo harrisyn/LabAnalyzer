@@ -26,8 +26,11 @@ class UpdateChecker:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(self.update_url, headers=self._headers) as response:
-                    if response.status != 200:
-                        return
+                    if response.status == 404:
+                        # Repository not found - this is expected in development
+                        return False
+                    elif response.status != 200:
+                        raise Exception(f"GitHub API returned status {response.status}")
                     
                     data = await response.json()
                     latest_version = data['tag_name'].lstrip('v')
@@ -38,11 +41,21 @@ class UpdateChecker:
                              if asset['name'].endswith('.exe')), None
                         )
                         
-                        if windows_asset and await self._prompt_update(latest_version):
+                        if not windows_asset:
+                            raise Exception("No Windows installer found in the latest release")
+                        
+                        if await self._prompt_update(latest_version):
                             await self._download_and_install(windows_asset['browser_download_url'])
+                            return True  # Update was initiated
+                        return None  # Update available but user declined
+                    else:
+                        return False  # No update available
 
+        except aiohttp.ClientError as e:
+            raise Exception(f"Network error: {str(e)}")
         except Exception as e:
             print(f"Update check failed: {e}")
+            raise  # Re-raise for manual check error handling
 
     def _compare_versions(self, version1, version2):
         """Compare two version strings"""

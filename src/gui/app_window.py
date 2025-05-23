@@ -138,7 +138,8 @@ class ApplicationWindow:
         self.figure = None
         self.scatter_plot = None
         self.scatter_canvas = None
-
+        self.scatter_image = None
+        
     def _create_menu(self):
         """Create the application menu bar"""
         menubar = tk.Menu(self.root)
@@ -156,6 +157,13 @@ class ApplicationWindow:
         view_menu.add_command(label="Show Scattergram", command=self._show_scattergram)
         view_menu.add_command(label="Hide Scattergram", command=self._hide_scattergram)
         
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="Check for Updates", command=self._check_for_updates_manual)
+        help_menu.add_separator()
+        help_menu.add_command(label="About", command=self._show_about)
+        
     def _show_settings(self):
         """Show the configuration dialog"""
         dialog = ConfigDialog(self.root, self.config)
@@ -171,6 +179,78 @@ class ApplicationWindow:
                     "Restart Required",
                     "Please restart the server for the new settings to take effect."
                 )
+
+    def _check_for_updates_manual(self):
+        """Manually trigger update check"""
+        def run_update_check():
+            try:
+                # Import here to avoid circular imports
+                from ..utils.updater import UpdateChecker
+                
+                # Show checking message
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Update Check", 
+                    "Checking for updates..."
+                ))
+                
+                # Create updater instance
+                updater = UpdateChecker(current_version=self.config.get('version', '1.0.0'))
+                
+                # Run the check in async context
+                import asyncio
+                
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                try:
+                    # Run the update check
+                    result = loop.run_until_complete(updater.check_for_updates())
+                    
+                    # If no update was found, show message
+                    if result is False:
+                        self.root.after(0, lambda: messagebox.showinfo(
+                            "No Updates", 
+                            "You are already running the latest version."
+                        ))
+                            
+                except Exception as e:
+                    self.root.after(0, lambda: messagebox.showerror(
+                        "Update Check Failed", 
+                        f"Failed to check for updates:\n{str(e)}"
+                    ))
+                finally:
+                    loop.close()
+                    
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Error", 
+                    f"Update check error: {str(e)}"
+                ))
+        
+        # Run in separate thread to avoid blocking GUI
+        thread = threading.Thread(target=run_update_check, daemon=True)
+        thread.start()
+
+    def _show_about(self):
+        """Show about dialog"""
+        version = self.config.get('version', '1.0.0')
+        app_name = self.config.get('app_name', 'LabSync')
+        
+        about_text = f"""{app_name} v{version}
+
+Laboratory Data Analysis and Synchronization Tool
+
+Features:
+• Real-time data processing from multiple analyzer protocols
+• ASTM, HL7, and proprietary protocol support
+• Data synchronization with external systems
+• Result visualization and reporting
+• System tray integration
+
+© 2025 TechNotes Consult - harrisyn@gmail.com"""
+        
+        messagebox.showinfo("About", about_text)
 
     def _create_status_frame(self):
         """Create the status section"""
