@@ -2,6 +2,7 @@
 Main GUI window for the analyzer application
 """
 import asyncio
+import os
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from datetime import datetime
@@ -10,6 +11,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 import threading
 import traceback
+import pystray
+from PIL import Image
 from .config_dialog import ConfigDialog
 
 class ApplicationWindow:
@@ -77,13 +80,20 @@ class ApplicationWindow:
         self.update_tasks = []
         self.server_task = None
         self.sync_task = None
-        
-        # Initialize flags
+          # Initialize flags
         self.is_shutting_down = False
         self.is_destroyed = False
+        self.is_hidden = False
+        
+        # Initialize system tray
+        self._init_system_tray()
+        
+        # Show notification that system tray is active
+        if hasattr(self, 'tray_icon') and self.tray_icon:
+            self.root.after(2000, lambda: self._show_tray_notification())
         
         # Set up clean shutdown
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
         
         # Check server status and update UI appropriately
         self._check_server_status()
@@ -133,13 +143,12 @@ class ApplicationWindow:
         """Create the application menu bar"""
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
-        
-        # File menu
+          # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Settings", command=self._show_settings)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.on_closing)
+        file_menu.add_command(label="Exit", command=self.quit_application)
         
         # View menu
         view_menu = tk.Menu(menubar, tearoff=0)
@@ -991,17 +1000,20 @@ class ApplicationWindow:
                     task.cancel()
                     try:
                         await task
-                    except asyncio.CancelledError:
-                        pass
+                    except asyncio.CancelledError:                        pass
                         
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
-            
+
     def on_closing(self):
         """Handle window closing"""
         try:
             # Set shutdown flag first
             self.is_shutting_down = True
+            
+            # Stop system tray icon
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.stop()
             
             # Remove logger callback
             self.logger.remove_ui_callback(self._handle_log_message)
@@ -1227,3 +1239,89 @@ class ApplicationWindow:
         except Exception as e:
             self.logger.error(f"Error applying filters: {e}")
             messagebox.showerror("Error", f"Failed to apply filters: {str(e)}")
+
+    def _init_system_tray(self):
+        """Initialize system tray icon and menu"""
+        try:
+            # Load icon for system tray
+            icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.png")
+            if not os.path.exists(icon_path):
+                # Fallback to ico file
+                icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.ico")
+            
+            if os.path.exists(icon_path):
+                self.tray_image = Image.open(icon_path)
+            else:
+                # Create a simple default icon if no file exists
+                self.tray_image = Image.new('RGB', (64, 64), color='blue')
+            
+            # Create system tray menu
+            self.tray_menu = pystray.Menu(
+                pystray.MenuItem("Show", self.show_window, default=True),
+                pystray.MenuItem("Hide", self.hide_window),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Settings", self._show_settings),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Exit", self.quit_application)
+            )
+            
+            # Create system tray icon
+            self.tray_icon = pystray.Icon(
+                "LabSync",
+                self.tray_image,
+                "LabSync - Lab Data Analyzer",
+                self.tray_menu
+            )
+            
+            # Start tray icon in background thread
+            self.tray_thread = threading.Thread(target=self._run_tray, daemon=True)
+            self.tray_thread.start()
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize system tray: {e}")
+            self.tray_icon = None
+
+    def _run_tray(self):
+        """Run the system tray icon"""
+        if self.tray_icon:
+            self.tray_icon.run()
+
+    def _show_tray_notification(self):
+        """Show initial system tray notification"""
+        try:
+            if hasattr(self.tray_icon, 'notify'):
+                self.tray_icon.notify("LabSync is running in the system tray. Click the X button to minimize to tray.")
+        except Exception as e:
+            self.logger.debug(f"Could not show tray notification: {e}")
+
+    def show_window(self, icon=None, item=None):
+        """Show the main window"""
+        if self.is_hidden:
+            self.root.after(0, self._show_window_main_thread)
+
+    def _show_window_main_thread(self):
+        """Show window in main thread"""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.is_hidden = False
+
+    def hide_window(self, icon=None, item=None):
+        """Hide the main window to system tray"""
+        self.root.withdraw()
+        self.is_hidden = True
+
+    def on_window_close(self):
+        """Handle window close button - minimize to tray instead of closing"""
+        if self.tray_icon:
+            self.hide_window()
+            # Show a notification that the app is still running
+            if hasattr(self.tray_icon, 'notify'):
+                self.tray_icon.notify("LabSync is still running in the system tray")
+        else:
+            # Fallback to normal closing if tray isn't available
+            self.quit_application()
+
+    def quit_application(self, icon=None, item=None):
+        """Actually quit the application"""
+        self.on_closing()

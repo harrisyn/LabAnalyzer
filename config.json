@@ -7,9 +7,9 @@
     "auto_start": false,
     "external_server": {
         "enabled": true,
-        "url": "https://webhook.site/b1b38bef-b5c4-4eca-a109-efd3d341ce42",
-        "api_key": "4389834943",
-        "sync_frequency": "cron",
+        "url": "https://api.staging.serenity.health/v2/emr/lab-analyzer-results",
+        "api_key": "efomrddi",
+        "sync_frequency": "realtime",
         "cron_schedule": "0 * * * *",
         "scheduled_hour": "0",
         "scheduled_minute": "0",
@@ -17,7 +17,7 @@
         "retry_interval": 60,
         "endpoint_path": "",
         "http_method": "POST",
-        "auth_method": "none",
+        "auth_method": "api_key",
         "api_key_header": "X-API-Key",
         "bearer_token": ""
     }
