@@ -31,18 +31,26 @@ class UpdateChecker:
                         # Repository not found - this is expected in development
                         return False
                     elif response.status != 200:
-                        raise Exception(f"GitHub API returned status {response.status}")
-                    
+                        raise Exception(f"GitHub API returned status {response.status}")                    
                     data = await response.json()
                     latest_version = data['tag_name'].lstrip('v')
                     
                     if self._compare_versions(latest_version, self.current_version) > 0:
-                        # Look for Windows installer - prefer .exe, fallback to .zip
-                        windows_asset = next(
-                            (asset for asset in data['assets'] 
-                             if asset['name'].endswith('.exe') or 
-                             (asset['name'].startswith('windows') and asset['name'].endswith('.zip'))), None
-                        )
+                        # Look for Windows installer - prioritize direct .exe files
+                        windows_asset = None
+                        
+                        # First, look for direct .exe installer (preferred)
+                        for asset in data['assets']:
+                            if asset['name'].endswith('.exe') and 'Setup' in asset['name']:
+                                windows_asset = asset
+                                break
+                        
+                        # Fallback to zip if no direct .exe found (legacy releases)
+                        if not windows_asset:
+                            windows_asset = next(
+                                (asset for asset in data['assets'] 
+                                 if asset['name'].startswith('windows') and asset['name'].endswith('.zip')), None
+                            )
                         
                         if not windows_asset:
                             raise Exception("No Windows installer found in the latest release")

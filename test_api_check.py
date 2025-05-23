@@ -25,17 +25,33 @@ async def test_github_api():
                     print(f"Latest release tag: {data.get('tag_name', 'N/A')}")
                     print(f"Release name: {data.get('name', 'N/A')}")
                     print(f"Published at: {data.get('published_at', 'N/A')}")
-                    
-                    # Check for Windows assets
+                      # Check for Windows assets
                     assets = data.get('assets', [])
-                    # Look for both .exe and windows .zip files
-                    windows_assets = [asset for asset in assets 
-                                    if asset['name'].endswith('.exe') or 
-                                    (asset['name'].startswith('windows') and asset['name'].endswith('.zip'))]
-                    print(f"Windows installer assets: {len(windows_assets)}")
                     
-                    for asset in windows_assets:
-                        print(f"  - {asset['name']} ({asset['size']} bytes)")
+                    # Check for Windows installer assets (prioritize .exe over .zip)
+                    windows_exe_assets = [asset for asset in assets if asset['name'].endswith('.exe') and 'Setup' in asset['name']]
+                    windows_zip_assets = [asset for asset in assets if asset['name'].startswith('windows') and asset['name'].endswith('.zip')]
+                    
+                    print(f"Windows .exe installer assets: {len(windows_exe_assets)}")
+                    if windows_exe_assets:
+                        for asset in windows_exe_assets:
+                            print(f"  - {asset['name']} ({asset['size']} bytes)")
+                    
+                    print(f"Windows .zip installer assets: {len(windows_zip_assets)}")
+                    if windows_zip_assets:
+                        for asset in windows_zip_assets:
+                            print(f"  - {asset['name']} ({asset['size']} bytes)")
+                    
+                    # Show which one would be selected by the updater
+                    preferred_asset = None
+                    if windows_exe_assets:
+                        preferred_asset = windows_exe_assets[0]
+                        print(f"✓ Updater would select: {preferred_asset['name']} (direct .exe - preferred)")
+                    elif windows_zip_assets:
+                        preferred_asset = windows_zip_assets[0]
+                        print(f"✓ Updater would select: {preferred_asset['name']} (fallback .zip)")
+                    else:
+                        print("✗ No suitable Windows installer found!")
                     
                     return True
                 else:

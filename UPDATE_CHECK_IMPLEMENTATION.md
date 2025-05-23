@@ -125,3 +125,31 @@ File    View    Help
 ```
 
 The Help menu is now available and fully functional!
+
+# Release Workflow Optimization
+
+## Asset Upload Strategy
+
+The GitHub Actions workflow has been optimized to upload installers directly as `.exe` files rather than zipped packages:
+
+### Windows Installer
+- **Preferred Format**: `LabSync-Setup-{version}.exe` (direct executable)
+- **Legacy Fallback**: `windows-installer.zip` (for older releases)
+
+### Updater Logic
+The updater prioritizes assets in this order:
+1. **Direct .exe files** containing "Setup" in the name (preferred)
+2. **Windows .zip files** starting with "windows" (fallback for legacy releases)
+
+### Benefits of Direct .exe Upload
+- ✅ Faster download and installation (no extraction step)
+- ✅ Simpler user experience
+- ✅ Reduced temporary disk usage
+- ✅ Better reliability (fewer steps to fail)
+
+### Current Workflow Configuration
+The `release.yml` workflow is already configured to:
+- Build Windows executable using PyInstaller
+- Create installer using Inno Setup
+- Upload the `.exe` file directly to releases
+- Generate proper update configuration JSON
