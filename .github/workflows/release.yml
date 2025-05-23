@@ -8,11 +8,50 @@ on:
       version:
         description: 'Version number (e.g. 1.0.0)'
         required: true
-        default: '0.0.0'
+        default: '1.0.0'
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: read
+  issues: read
+  actions: read
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_id: ${{ steps.create_release.outputs.id }}
+      tag_name: v${{ github.event.inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: Release v${{ github.event.inputs.version }}
+          body: |
+            Release version ${{ github.event.inputs.version }}
+            
+            ## Changes
+            - Built from commit ${{ github.sha }}
+            
+            ## Downloads
+            - Windows Installer: LabSync-Setup-${{ github.event.inputs.version }}.exe
+            - macOS Package: LabSync-${{ github.event.inputs.version }}.dmg
+          draft: false
+          prerelease: false
+
   build-windows:
     runs-on: windows-latest
+    needs: [create-release]
+    if: always() && !cancelled()
     steps:
       - uses: actions/checkout@v4
       
@@ -60,7 +99,7 @@ jobs:
           iscc "/DAppVersion=$env:APP_VERSION" "installer/windows/installer.iss"
           echo "Contents of dist after Inno Setup:"
           Get-ChildItem -Path dist -Recurse | Format-Table FullName
-
+          
       - name: Upload Installer Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -68,18 +107,17 @@ jobs:
           path: dist/LabSync-Setup-${{ env.APP_VERSION }}.exe
 
       - name: Upload Release Asset
-        if: github.event_name == 'release'
-        uses: actions/upload-release-asset@v1
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && needs.create-release.result == 'success')
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./dist/LabSync-Setup-${{ env.APP_VERSION }}.exe
-          asset_name: LabSync-Setup-${{ env.APP_VERSION }}.exe
-          asset_content_type: application/octet-stream
-
+          tag_name: ${{ github.event_name == 'release' && github.ref || needs.create-release.outputs.tag_name }}
+          files: ./dist/LabSync-Setup-${{ env.APP_VERSION }}.exe
   build-macos:
     runs-on: macos-latest
+    needs: [create-release]
+    if: always() && !cancelled()
     steps:
       - uses: actions/checkout@v4
       
@@ -132,39 +170,44 @@ jobs:
           path: dist/LabSync-${{ env.APP_VERSION }}.dmg
 
       - name: Upload Release Asset
-        if: github.event_name == 'release'
-        uses: actions/upload-release-asset@v1
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && needs.create-release.result == 'success')
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./dist/LabSync-${{ env.APP_VERSION }}.dmg
-          asset_name: LabSync-${{ env.APP_VERSION }}.dmg
-          asset_content_type: application/x-apple-diskimage
-
+          tag_name: ${{ github.event_name == 'release' && github.ref || needs.create-release.outputs.tag_name }}
+          files: ./dist/LabSync-${{ env.APP_VERSION }}.dmg
   create-update-info:
     needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && needs.create-release.result == 'success')
     steps:
+      - name: Set Version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.ref }}"
+            VERSION="${VERSION#refs/tags/v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          
       - name: Create update config
         run: |
           cat > update_config.json << EOL
           {
-            "latest_version": "${GITHUB_REF#refs/tags/v}",
-            "download_url": "${{ github.event.release.html_url }}",
-            "windows_url": "${{ github.event.release.assets[0].browser_download_url }}",
-            "macos_url": "${{ github.event.release.assets[1].browser_download_url }}",
-            "changelog_url": "${{ github.event.release.html_url }}"
+            "latest_version": "${{ env.APP_VERSION }}",
+            "download_url": "https://github.com/${{ github.repository }}/releases/tag/v${{ env.APP_VERSION }}",
+            "windows_url": "https://github.com/${{ github.repository }}/releases/download/v${{ env.APP_VERSION }}/LabSync-Setup-${{ env.APP_VERSION }}.exe",
+            "macos_url": "https://github.com/${{ github.repository }}/releases/download/v${{ env.APP_VERSION }}/LabSync-${{ env.APP_VERSION }}.dmg",
+            "changelog_url": "https://github.com/${{ github.repository }}/releases/tag/v${{ env.APP_VERSION }}"
           }
           EOL
 
       - name: Upload update config
-        uses: actions/upload-release-asset@v1
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./update_config.json
-          asset_name: update_config.json
-          asset_content_type: application/json
+          tag_name: ${{ github.event_name == 'release' && github.ref || needs.create-release.outputs.tag_name }}
+          files: ./update_config.json
