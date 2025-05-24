@@ -47,19 +47,13 @@ async def setup_application():
     
     try:
         config = Config()
-        logger = Logger(name=config.get("app_name", "LabSync"))        # Initialize core components
+        logger = Logger(name=config.get("app_name", "LabSync"))
+          # Initialize core components
         logger.info("Initializing core application components...")
         
         # Initialize database manager
-        try:
-            db_manager = DatabaseManager()
-            if not db_manager.initialized:
-                logger.error("Database manager failed to initialize properly")
-                raise RuntimeError("Database initialization failed")
-            logger.info("Database manager initialized successfully")
-        except Exception as e:
-            logger.error(f"Database initialization error: {str(e)}")
-            raise
+        db_manager = DatabaseManager()
+        logger.info("Database manager initialized")
         
         # Create Tkinter root window
         root = tk.Tk()
