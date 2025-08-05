@@ -16,6 +16,29 @@ import zipfile
 import time
 
 class UpdateChecker:
+    def _get_last_downloaded_info(self):
+        info_path = self.temp_dir / "last_downloaded.json"
+        if info_path.exists():
+            try:
+                with open(info_path, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Error reading last_downloaded.json: {e}")
+        return None
+
+    def _set_last_downloaded_info(self, version, path):
+        info_path = self.temp_dir / "last_downloaded.json"
+        info = {
+            "version": version,
+            "path": str(path),
+            "timestamp": time.strftime("%Y-%m-%d")
+        }
+        try:
+            with open(info_path, "w") as f:
+                json.dump(info, f)
+        except Exception as e:
+            print(f"Error writing last_downloaded.json: {e}")
+            
     def __init__(self, current_version="1.0.0", app_window=None):
         self.current_version = current_version
         self.app_window = app_window  # Reference to main application window for clean shutdown
@@ -29,228 +52,278 @@ class UpdateChecker:
         """Check GitHub releases for newer version"""
         try:
             print("Checking for updates...")
-            async with aiohttp.ClientSession() as session:
-                async with session.get(self.update_url, headers=self._headers) as response:
-                    if response.status == 404:
-                        # Repository not found - this is expected in development
-                        print("Repository not found (404)")
-                        return False
-                    elif response.status != 200:
-                        print(f"GitHub API returned status {response.status}")
-                        raise Exception(f"GitHub API returned status {response.status}")                    
-                    data = await response.json()
-                    latest_version = data['tag_name'].lstrip('v')
-                    print(f"Latest version: {latest_version}, Current version: {self.current_version}")
-                    
-                    if self._compare_versions(latest_version, self.current_version) > 0:
-                        print("New version available")
-                        # Look for Windows installer - prioritize direct .exe files
-                        windows_asset = None
-                        
-                        # First, look for direct .exe installer (preferred)
-                        for asset in data['assets']:
-                            if asset['name'].endswith('.exe') and 'Setup' in asset['name']:
-                                windows_asset = asset
-                                print(f"Found Windows installer: {asset['name']}")
-                                break
-                        
-                        # Fallback to zip if no direct .exe found (legacy releases)
-                        if not windows_asset:
-                            windows_asset = next(
-                                (asset for asset in data['assets'] 
-                                 if asset['name'].startswith('windows') and asset['name'].endswith('.zip')), None
-                            )
-                            if windows_asset:
-                                print(f"Found Windows zip installer: {windows_asset['name']}")
-                        
-                        if not windows_asset:
-                            print("No Windows installer found in the latest release")
-                            raise Exception("No Windows installer found in the latest release")
-                        
-                        if await self._prompt_update(latest_version):
-                            print("User accepted update")
-                            await self._download_and_install(windows_asset['browser_download_url'])
-                            return True  # Update was initiated
-                        print("User declined update")
-                        return None  # Update available but user declined
-                    else:
-                        print("No update available")
-                        return False  # No update available
-
-        except aiohttp.ClientError as e:
-            print(f"Network error checking for updates: {str(e)}")
-            raise Exception(f"Network error: {str(e)}")
+            timeout = aiohttp.ClientTimeout(total=10, connect=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                print(f"Requesting update info from: {self.update_url}")
+                try:
+                    async with session.get(self.update_url, headers=self._headers) as response:
+                        print(f"GitHub API response status: {response.status}")
+                        if response.status == 404:
+                            print("Repository not found (404)")
+                            return False
+                        elif response.status != 200:
+                            print(f"GitHub API returned status {response.status}")
+                            raise Exception(f"GitHub API returned status {response.status}")
+                        data = await response.json()
+                        latest_version = data.get('tag_name', '').lstrip('v')
+                        print(f"Latest version from GitHub: {latest_version}")
+                        print(f"Current version in app: {self.current_version}")
+                        cmp_result = self._compare_versions(latest_version, self.current_version)
+                        print(f"Version compare result: {cmp_result}")
+                        if cmp_result > 0:
+                            print("New version available!")
+                            windows_asset = None
+                            for asset in data.get('assets', []):
+                                print(f"Checking asset: {asset.get('name')}")
+                                if asset.get('name', '').endswith('.exe') and 'Setup' in asset.get('name', ''):
+                                    windows_asset = asset
+                                    print(f"Found Windows installer: {asset['name']}")
+                                    break
+                            if not windows_asset:
+                                windows_asset = next(
+                                    (asset for asset in data.get('assets', []) 
+                                     if asset.get('name', '').startswith('windows') and asset.get('name', '').endswith('.zip')), None
+                                )
+                                if windows_asset:
+                                    print(f"Found Windows zip installer: {windows_asset['name']}")
+                            if not windows_asset:
+                                print("No Windows installer found in the latest release")
+                                raise Exception("No Windows installer found in the latest release")
+                            prompt_result = await self._prompt_update(latest_version)
+                            print(f"Prompt result: {prompt_result}")
+                            if prompt_result:
+                                print("User accepted update")
+                                await self._download_and_install(windows_asset['browser_download_url'], latest_version=latest_version)
+                                return True  # Update was initiated
+                            print("User declined update")
+                            return None  # Update available but user declined
+                        else:
+                            print("No update available")
+                            return False  # No update available
+                except asyncio.TimeoutError as e:
+                    print(f"TimeoutError during update check: {e}")
+                    raise Exception(f"TimeoutError: {e}")
+                except aiohttp.ClientError as e:
+                    print(f"aiohttp ClientError during update check: {e}")
+                    raise Exception(f"Network error: {e}")
+                except Exception as e:
+                    print(f"General exception during update check: {e}")
+                    raise
         except Exception as e:
             print(f"Update check failed: {e}")
             raise  # Re-raise for manual check error handling
 
     def _compare_versions(self, version1, version2):
         """Compare two version strings"""
-        v1_parts = [int(x) for x in version1.split('.')]
-        v2_parts = [int(x) for x in version2.split('.')]
-        
+        print(f"Comparing versions: {version1} vs {version2}")
+        try:
+            v1_parts = [int(x) for x in version1.split('.')]
+            v2_parts = [int(x) for x in version2.split('.')]
+        except Exception as e:
+            print(f"Error parsing version strings: {e}")
+            return 0
         for i in range(max(len(v1_parts), len(v2_parts))):
             v1 = v1_parts[i] if i < len(v1_parts) else 0
             v2 = v2_parts[i] if i < len(v2_parts) else 0
+            print(f"Compare part: v1={v1}, v2={v2}")
             if v1 > v2:
+                print("v1 > v2")
                 return 1
             if v1 < v2:
+                print("v1 < v2")
                 return -1
+        print("Versions are equal")
         return 0
         
     async def _prompt_update(self, new_version):
-        """Show update prompt to user"""
-        return messagebox.askyesno(
-            "Update Available",
-            f"Version {new_version} is available. Would you like to update now?"
-        )
+        """Show update prompt to user in the main Tkinter thread"""
+        result = None
+        def show_prompt():
+            nonlocal result
+            result = messagebox.askyesno(
+                "Update Available",
+                f"Version {new_version} is available. Would you like to update now?"
+            )
+        # If we have a reference to the main window, use root.after to schedule prompt
+        if self.app_window and hasattr(self.app_window, 'root'):
+            self.app_window.root.after(0, show_prompt)
+            # Wait for the prompt to be answered
+            while result is None:
+                self.app_window.root.update()
+                await asyncio.sleep(0.05)
+            return result
+        else:
+            # Fallback: call directly (may fail if not in main thread)
+            return messagebox.askyesno(
+                "Update Available",
+                f"Version {new_version} is available. Would you like to update now?"
+            )
         
-    async def _download_and_install(self, download_url):
+    async def _download_and_install(self, download_url, latest_version=None):
         """Download and install the new version"""
         try:
-            print(f"Downloading update from {download_url}")
-            # Determine if we're downloading a zip or exe
-            is_zip = download_url.endswith('.zip')
-            download_path = self.temp_dir / ("installer.zip" if is_zip else "LabSync-Setup.exe")
-            
-            # Create progress dialog
-            progress_window = tk.Toplevel()
-            progress_window.title("Downloading Update")
-            progress_window.geometry("400x150")
-            progress_window.resizable(False, False)
-            progress_window.transient(tk._default_root)  # Make it stay on top of main window
-            progress_window.grab_set()  # Make it modal
-            
-            # Set window icon
-            try:
-                icon_path = os.path.join(os.path.dirname(__file__), "..", "gui", "resources", "icon.ico")
-                if os.path.exists(icon_path):
-                    progress_window.iconbitmap(icon_path)
-            except Exception as e:
-                print(f"Error setting icon: {e}")
-                pass  # Ignore icon errors
-                
-            # Center the window
-            progress_window.update_idletasks()
-            width = progress_window.winfo_width()
-            height = progress_window.winfo_height()
-            x = (progress_window.winfo_screenwidth() // 2) - (width // 2)
-            y = (progress_window.winfo_screenheight() // 2) - (height // 2)
-            progress_window.geometry(f'{width}x{height}+{x}+{y}')
-            
-            # Create progress components
-            tk.Label(progress_window, text="Downloading update...", font=("Arial", 12)).pack(pady=(15, 5))
-            progress_var = tk.DoubleVar()
-            progress_bar = ttk.Progressbar(progress_window, variable=progress_var, maximum=100, length=350)
-            progress_bar.pack(pady=5, padx=25)
-            status_var = tk.StringVar(value="Starting download...")
-            status_label = tk.Label(progress_window, textvariable=status_var)
-            status_label.pack(pady=5)
-            
-            # Update the UI during download
-            def update_progress(percentage, message):
-                progress_var.set(percentage)
-                status_var.set(message)
-                progress_window.update()
-                
-            # Download with progress tracking
-            download_success = False
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(download_url) as response:
-                        if response.status != 200:
-                            progress_window.destroy()
-                            raise Exception(f"Download failed with status {response.status}")
-                        
-                        # Get total size for percentage calculation
-                        total_size = int(response.headers.get('Content-Length', 0))
-                        if total_size == 0:
-                            # If Content-Length is not provided, use indefinite progress
-                            update_progress(0, "Downloading... (size unknown)")
-                            with open(download_path, 'wb') as f:
-                                f.write(await response.read())
-                        else:
-                            # Download with progress updates
-                            chunk_size = 1024 * 8  # 8KB chunks
-                            downloaded = 0
-                            start_time = time.time()
-                            
-                            with open(download_path, 'wb') as f:
-                                async for chunk in response.content.iter_chunked(chunk_size):
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    percentage = min(100.0, downloaded * 100 / total_size)
-                                    
-                                    # Calculate download speed and ETA
-                                    elapsed = time.time() - start_time
-                                    mb_downloaded = downloaded / (1024 * 1024)
-                                    mb_total = total_size / (1024 * 1024)
-                                    
-                                    speed = mb_downloaded / elapsed if elapsed > 0 else 0
-                                    eta = (mb_total - mb_downloaded) / speed if speed > 0 else 0
-                                    
-                                    message = f"Downloaded: {mb_downloaded:.1f} MB of {mb_total:.1f} MB ({percentage:.1f}%)"
-                                    if speed > 0:
-                                        message += f" | {speed:.1f} MB/s | ETA: {eta:.0f}s"
-                                        
-                                    # Update progress every ~20ms to avoid UI freezing
-                                    update_progress(percentage, message)
-                        
-                download_success = True
-                        
-            except aiohttp.ClientError as e:
-                progress_window.destroy()
-                messagebox.showerror("Download Error", f"Failed to download update: {str(e)}")
-                raise
-            except Exception as e:
-                progress_window.destroy()
-                messagebox.showerror("Download Error", f"Failed to download update: {str(e)}")
-                raise
-                    
-            # Update status before extraction
-            if download_success:
-                update_progress(100, "Download complete. Preparing installer...")
-            
-            # Close progress dialog
-            progress_window.destroy()
-
-
-            # Verify download
-            if not os.path.exists(download_path) or os.path.getsize(download_path) == 0:
-                # Open the folder for manual access
-                try:
-                    os.startfile(self.temp_dir)
-                except Exception as e:
-                    print(f"Failed to open download folder: {e}")
-                messagebox.showerror("Download Error", f"Downloaded file is empty or missing.\nPlease check the folder:\n{self.temp_dir}")
-                return
-
-            # Handle zip extraction if needed
-            if is_zip:
-                try:
-                    with zipfile.ZipFile(download_path, 'r') as zip_ref:
-                        zip_ref.extractall(self.temp_dir)
-                except Exception as e:
-                    os.startfile(self.temp_dir)
-                    messagebox.showerror("Extraction Error", f"Failed to extract installer zip.\nError: {e}\nPlease check the folder:\n{self.temp_dir}")
-                    return
-                # Find the .exe file in the extracted contents
-                exe_files = list(self.temp_dir.glob("**/*.exe"))
-                if not exe_files:
-                    os.startfile(self.temp_dir)
-                    messagebox.showerror("Installer Error", f"No .exe installer found in the downloaded zip.\nPlease check the folder:\n{self.temp_dir}")
-                    return
-                installer_path = exe_files[0]  # Use the first .exe found
+            # Check for existing recent download
+            if latest_version:
+                last_info = self._get_last_downloaded_info()
+                today = time.strftime("%Y-%m-%d")
+                if last_info and last_info.get("version") == latest_version and last_info.get("timestamp") == today:
+                    installer_path = Path(last_info.get("path"))
+                    if installer_path.exists() and installer_path.stat().st_size > 0:
+                        print(f"Reusing previously downloaded installer for version {latest_version}: {installer_path}")
+                        download_success = True
+                    else:
+                        print("Last downloaded installer missing or empty, will re-download.")
+                        download_success = False
+                else:
+                    download_success = False
             else:
-                installer_path = download_path
+                download_success = False
 
-            # Verify installer exists
-            if not os.path.exists(installer_path):
-                os.startfile(self.temp_dir)
-                messagebox.showerror("Installer Error", f"Installer file missing: {installer_path}\nPlease check the folder:\n{self.temp_dir}")
-                return
+            if not download_success:
+                print(f"Downloading update from {download_url}")
+                # Determine if we're downloading a zip or exe
+                is_zip = download_url.endswith('.zip')
+                download_path = self.temp_dir / ("installer.zip" if is_zip else "LabSync-Setup.exe")
 
-            print(f"Installer ready: {installer_path}")
+                # Create progress dialog
+                progress_window = tk.Toplevel()
+                progress_window.title("Downloading Update")
+                progress_window.geometry("400x150")
+                progress_window.resizable(False, False)
+                progress_window.transient(tk._default_root)  # Make it stay on top of main window
+                progress_window.grab_set()  # Make it modal
+
+                # Set window icon
+                try:
+                    icon_path = os.path.join(os.path.dirname(__file__), "..", "gui", "resources", "icon.ico")
+                    if os.path.exists(icon_path):
+                        progress_window.iconbitmap(icon_path)
+                except Exception as e:
+                    print(f"Error setting icon: {e}")
+                    pass  # Ignore icon errors
+
+                # Center the window
+                progress_window.update_idletasks()
+                width = progress_window.winfo_width()
+                height = progress_window.winfo_height()
+                x = (progress_window.winfo_screenwidth() // 2) - (width // 2)
+                y = (progress_window.winfo_screenheight() // 2) - (height // 2)
+                progress_window.geometry(f'{width}x{height}+{x}+{y}')
+
+                # Create progress components
+                tk.Label(progress_window, text="Downloading update...", font=("Arial", 12)).pack(pady=(15, 5))
+                progress_var = tk.DoubleVar()
+                progress_bar = ttk.Progressbar(progress_window, variable=progress_var, maximum=100, length=350)
+                progress_bar.pack(pady=5, padx=25)
+                status_var = tk.StringVar(value="Starting download...")
+                status_label = tk.Label(progress_window, textvariable=status_var)
+                status_label.pack(pady=5)
+
+                # Update the UI during download
+                def update_progress(percentage, message):
+                    progress_var.set(percentage)
+                    status_var.set(message)
+                    progress_window.update()
+
+                # Download with progress tracking
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(download_url) as response:
+                            if response.status != 200:
+                                progress_window.destroy()
+                                raise Exception(f"Download failed with status {response.status}")
+
+                            # Get total size for percentage calculation
+                            total_size = int(response.headers.get('Content-Length', 0))
+                            if total_size == 0:
+                                # If Content-Length is not provided, use indefinite progress
+                                update_progress(0, "Downloading... (size unknown)")
+                                with open(download_path, 'wb') as f:
+                                    f.write(await response.read())
+                            else:
+                                # Download with progress updates
+                                chunk_size = 1024 * 8  # 8KB chunks
+                                downloaded = 0
+                                start_time = time.time()
+
+                                with open(download_path, 'wb') as f:
+                                    async for chunk in response.content.iter_chunked(chunk_size):
+                                        f.write(chunk)
+                                        downloaded += len(chunk)
+                                        percentage = min(100.0, downloaded * 100 / total_size)
+
+                                        # Calculate download speed and ETA
+                                        elapsed = time.time() - start_time
+                                        mb_downloaded = downloaded / (1024 * 1024)
+                                        mb_total = total_size / (1024 * 1024)
+
+                                        speed = mb_downloaded / elapsed if elapsed > 0 else 0
+                                        eta = (mb_total - mb_downloaded) / speed if speed > 0 else 0
+
+                                        message = f"Downloaded: {mb_downloaded:.1f} MB of {mb_total:.1f} MB ({percentage:.1f}%)"
+                                        if speed > 0:
+                                            message += f" | {speed:.1f} MB/s | ETA: {eta:.0f}s"
+
+                                        # Update progress every ~20ms to avoid UI freezing
+                                        update_progress(percentage, message)
+
+                    download_success = True
+
+                except aiohttp.ClientError as e:
+                    progress_window.destroy()
+                    messagebox.showerror("Download Error", f"Failed to download update: {str(e)}")
+                    raise
+                except Exception as e:
+                    progress_window.destroy()
+                    messagebox.showerror("Download Error", f"Failed to download update: {str(e)}")
+                    raise
+
+                # Update status before extraction
+                if download_success:
+                    update_progress(100, "Download complete. Preparing installer...")
+
+                # Close progress dialog
+                progress_window.destroy()
+
+                # Verify download
+                if not os.path.exists(download_path) or os.path.getsize(download_path) == 0:
+                    # Open the folder for manual access
+                    try:
+                        os.startfile(self.temp_dir)
+                    except Exception as e:
+                        print(f"Failed to open download folder: {e}")
+                    messagebox.showerror("Download Error", f"Downloaded file is empty or missing.\nPlease check the folder:\n{self.temp_dir}")
+                    return
+
+                # Handle zip extraction if needed
+                if is_zip:
+                    try:
+                        with zipfile.ZipFile(download_path, 'r') as zip_ref:
+                            zip_ref.extractall(self.temp_dir)
+                    except Exception as e:
+                        os.startfile(self.temp_dir)
+                        messagebox.showerror("Extraction Error", f"Failed to extract installer zip.\nError: {e}\nPlease check the folder:\n{self.temp_dir}")
+                        return
+                    # Find the .exe file in the extracted contents
+                    exe_files = list(self.temp_dir.glob("**/*.exe"))
+                    if not exe_files:
+                        os.startfile(self.temp_dir)
+                        messagebox.showerror("Installer Error", f"No .exe installer found in the downloaded zip.\nPlease check the folder:\n{self.temp_dir}")
+                        return
+                    installer_path = exe_files[0]  # Use the first .exe found
+                else:
+                    installer_path = download_path
+
+                # Verify installer exists
+                if not os.path.exists(installer_path):
+                    os.startfile(self.temp_dir)
+                    messagebox.showerror("Installer Error", f"Installer file missing: {installer_path}\nPlease check the folder:\n{self.temp_dir}")
+                    return
+
+                print(f"Installer ready: {installer_path}")
+                # Record last downloaded info
+                if latest_version:
+                    self._set_last_downloaded_info(latest_version, installer_path)
                 
             # Get the main application process ID
             import psutil
@@ -263,8 +336,18 @@ class UpdateChecker:
             batch_path = self.temp_dir / "update.bat"
             
             # Make sure installer path is absolute and quoted properly
-            installer_path_str = str(installer_path).replace('"', '""')
-            
+            installer_path_str = str(installer_path)
+            installer_path_str_quoted = f'"{installer_path_str}"'
+
+            # Detect correct Program Files path for post-install launch
+            program_files = os.environ.get('ProgramFiles', r'C:\Program Files')
+            program_files_x86 = os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')
+            # Try both possible install locations
+            possible_exe_paths = [
+                os.path.join(program_files, 'LabSync', 'LabSync.exe'),
+                os.path.join(program_files_x86, 'LabSync', 'LabSync.exe')
+            ]
+
             with open(batch_path, 'w') as f:
                 f.write('@echo off\n')
                 f.write('setlocal enabledelayedexpansion\n')
@@ -272,11 +355,11 @@ class UpdateChecker:
                 f.write('echo LabSync Updater\n')
                 f.write('echo ============================\n')
                 f.write('echo.\n')
-                
+
                 # Add a small delay to ensure the parent process has time to exit
                 f.write('echo Waiting for application to close...\n')
                 f.write('timeout /t 5 /nobreak > nul\n')
-                
+
                 # Check if the process is still running by PID
                 f.write(f'tasklist /FI "PID eq {app_pid}" 2>nul | find "{app_pid}" >nul\n')
                 f.write('if !ERRORLEVEL! EQU 0 (\n')
@@ -285,7 +368,7 @@ class UpdateChecker:
                 f.write('    if !ERRORLEVEL! NEQ 0 echo Failed to terminate process {app_pid}\n')
                 f.write('    timeout /t 2 /nobreak > nul\n')
                 f.write(')\n')
-                
+
                 # Also look for any instances by executable name
                 f.write(f'echo Checking for other instances of {app_name}...\n')
                 f.write(f'tasklist /FI "IMAGENAME eq {app_name}" 2>nul | find "{app_name}" >nul\n')
@@ -295,15 +378,20 @@ class UpdateChecker:
                 f.write('    if !ERRORLEVEL! NEQ 0 echo Failed to terminate other instances\n')
                 f.write('    timeout /t 2 /nobreak > nul\n')
                 f.write(')\n')
-                
-                # Run the installer with proper error handling
+
+                # Run the installer with elevation using PowerShell
                 f.write('echo.\n')
                 f.write(f'echo Installing update from:\n')
                 f.write(f'echo {installer_path_str}\n')
-                f.write('echo.\n')
-                
-                # Use call to prevent batch termination if installer fails
-                f.write(f'call "{installer_path_str}" /VERYSILENT /NORESTART /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS\n')
+                f.write(f'if not exist {installer_path_str_quoted} (\n')
+                f.write('    echo ERROR: Installer not found!\n')
+                f.write('    pause\n')
+                f.write('    exit /b 1\n')
+                f.write(')\n')
+                f.write('echo Launching installer with elevation...\n')
+                f.write(f'powershell -Command "Start-Process {installer_path_str_quoted} -Verb RunAs"\n')
+                f.write('echo Installer launch attempted.\n')
+                f.write('pause\n')
                 f.write('if !ERRORLEVEL! NEQ 0 (\n')
                 f.write('    echo.\n')
                 f.write('    echo Installation failed with error code !ERRORLEVEL!\n')
@@ -313,20 +401,22 @@ class UpdateChecker:
                 f.write('    pause\n')
                 f.write('    exit /b !ERRORLEVEL!\n')
                 f.write(')\n')
-                
+
                 # Success message
                 f.write('echo.\n')
                 f.write('echo Update completed successfully!\n')
                 f.write('echo The application will start automatically.\n')
-                
-                # Try to start the updated application
+
+                # Try to start the updated application from both possible install locations
                 f.write('echo Starting updated application...\n')
-                f.write('start "" "C:\\Program Files\\LabSync\\LabSync.exe" 2>nul\n')
+                for exe_path in possible_exe_paths:
+                    exe_path_quoted = f'"{exe_path}"'
+                    f.write(f'if exist {exe_path_quoted} start "" {exe_path_quoted} 2>nul\n')
                 f.write('if !ERRORLEVEL! NEQ 0 (\n')
                 f.write('    echo Unable to automatically start the application.\n')
                 f.write('    echo Please start it manually from the Start Menu.\n')
                 f.write(')\n')
-                
+
                 # Clean up
                 f.write('echo.\n')
                 f.write('echo Cleaning up temporary files...\n')

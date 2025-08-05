@@ -125,12 +125,16 @@ async def setup_application():
 def periodic_gui_update(app, root):
     """Run periodic GUI updates"""
     try:
+        # Prevent updates if shutting down
+        if getattr(app, 'is_shutting_down', False):
+            return
         app.update_results()
         app.update_ui_status()  # Changed from update_status to update_ui_status
     except Exception as e:
-        app.logger.error(f"Error in GUI update: {e}")
+        if hasattr(app, 'logger'):
+            app.logger.error(f"Error in GUI update: {e}")
     finally:
-        if root.winfo_exists():
+        if not getattr(app, 'is_shutting_down', False) and root.winfo_exists():
             root.after(1000, lambda: periodic_gui_update(app, root))
 
 def main():
@@ -200,16 +204,16 @@ def main():
         if 'logger' in locals():
             logger.error(f"Application error: {e}")
         sys.exit(1)
-    finally:
-        # Final cleanup
-        if 'db_manager' in locals():
-            db_manager.close()
-        if 'loop' in locals():
-            try:
-                loop.stop()
-                loop.close()
-            except Exception as e:
-                print(f"Error closing event loop: {e}")
+
+    # Final cleanup
+    if 'db_manager' in locals():
+        db_manager.close()
+    if 'loop' in locals():
+        try:
+            loop.stop()
+            loop.close()
+        except Exception as e:
+            print(f"Error closing event loop: {e}")
 
 if __name__ == "__main__":
     main()
