@@ -3,6 +3,7 @@ Main GUI window for the analyzer application
 """
 import asyncio
 import os
+import sys
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from datetime import datetime
@@ -36,36 +37,29 @@ class ApplicationWindow:
         
         self.root.title(self.config.get("app_name", "LabSync"))
         
-        # Set application icon using Windows-specific approach
-        try:
-            import os
-            import ctypes
-            import sys
-            from PIL import Image, ImageTk
-            
-            icon_path = os.path.join(os.path.dirname(__file__), "resources", "icon.ico")
-            
-            if os.path.exists(icon_path):
-                # Set the taskbar icon using Windows API
-                if sys.platform == 'win32':
-                    myappid = 'company.product.subproduct.version'  # arbitrary string
-                    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-                
-                # Set window icon
-                self.root.iconbitmap(default=icon_path)
-                
-                # Set taskbar icon using both methods
+        # Robust icon setting for both dev and PyInstaller builds
+        def get_icon_path():
+            # PyInstaller bundle locations
+            if getattr(sys, 'frozen', False):
+                base = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+                candidate = os.path.join(base, "gui", "resources", "icon.ico")
+                if os.path.exists(candidate):
+                    return candidate
+                candidate = os.path.join(os.path.dirname(sys.executable), "gui", "resources", "icon.ico")
+                if os.path.exists(candidate):
+                    return candidate
+            # Dev mode
+            candidate = os.path.join(os.path.dirname(__file__), "resources", "icon.ico")
+            if os.path.exists(candidate):
+                return candidate
+            return None
+
+        icon_path = get_icon_path()
+        if icon_path:
+            try:
                 self.root.iconbitmap(icon_path)
-                self.root.wm_iconbitmap(icon_path)
-                
-                # Also try PhotoImage method
-                ico = Image.open(icon_path)
-                photo = ImageTk.PhotoImage(ico)
-                self.root.iconphoto(True, photo)
-                self._icon_photo = photo  # Keep reference
-                
-        except Exception as e:
-            self.logger.warning(f"Failed to set application icon: {e}")
+            except Exception as e:
+                self.logger.warning(f"Failed to set window icon: {e}")
             
         self.root.geometry("900x600")
 
@@ -80,7 +74,7 @@ class ApplicationWindow:
         self.update_tasks = []
         self.server_task = None
         self.sync_task = None
-          # Initialize flags
+        # Initialize flags
         self.is_shutting_down = False
         self.is_destroyed = False
         self.is_hidden = False

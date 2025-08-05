@@ -39,6 +39,7 @@ class Config:
     def _create_default_config(self):
         """Create a default configuration"""
         return {
+            "version": "1.0.0",
             "port": 5000,
             "app_name": "LabSync",
             "instance_id": "LABSYNC-001",

@@ -35,6 +35,10 @@ else:
 # Enable nested event loops
 nest_asyncio.apply()
 
+try:
+    from src.version import __version__ as build_version
+except ImportError:
+    build_version = "1.0.0"
 async def setup_application():
     """Initialize application components"""
     config = None
@@ -47,14 +51,16 @@ async def setup_application():
     
     try:
         config = Config()
+        # Always update config version to match build version
+        config.update(version=build_version)
+
         logger = Logger(name=config.get("app_name", "LabSync"))
-          # Initialize core components
-        logger.info("Initializing core application components...")
-        
+        logger.info(f"Initializing core application components... Version: {build_version}")
+
         # Initialize database manager
         db_manager = DatabaseManager()
         logger.info("Database manager initialized")
-        
+
         # Create Tkinter root window
         root = tk.Tk()
 
@@ -75,12 +81,13 @@ async def setup_application():
             logger=logger,
             loop=loop
         )
-        
+
         # Initialize update checker with reference to app window
         updater = UpdateChecker(
-            current_version=config.get("version", "1.0.0"),
+            current_version=build_version,
             app_window=app
-        )        # Start update check in background
+        )
+        # Start update check in background
         asyncio.create_task(updater.check_updates_periodically())
 
         # Attach GUI callback to server after creation

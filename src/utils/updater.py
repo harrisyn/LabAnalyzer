@@ -214,28 +214,42 @@ class UpdateChecker:
             # Close progress dialog
             progress_window.destroy()
 
+
             # Verify download
             if not os.path.exists(download_path) or os.path.getsize(download_path) == 0:
-                raise Exception("Downloaded file is empty or missing")
+                # Open the folder for manual access
+                try:
+                    os.startfile(self.temp_dir)
+                except Exception as e:
+                    print(f"Failed to open download folder: {e}")
+                messagebox.showerror("Download Error", f"Downloaded file is empty or missing.\nPlease check the folder:\n{self.temp_dir}")
+                return
 
             # Handle zip extraction if needed
             if is_zip:
-                with zipfile.ZipFile(download_path, 'r') as zip_ref:
-                    zip_ref.extractall(self.temp_dir)
-                
+                try:
+                    with zipfile.ZipFile(download_path, 'r') as zip_ref:
+                        zip_ref.extractall(self.temp_dir)
+                except Exception as e:
+                    os.startfile(self.temp_dir)
+                    messagebox.showerror("Extraction Error", f"Failed to extract installer zip.\nError: {e}\nPlease check the folder:\n{self.temp_dir}")
+                    return
                 # Find the .exe file in the extracted contents
                 exe_files = list(self.temp_dir.glob("**/*.exe"))
                 if not exe_files:
-                    raise Exception("No .exe installer found in the downloaded zip")
-                
+                    os.startfile(self.temp_dir)
+                    messagebox.showerror("Installer Error", f"No .exe installer found in the downloaded zip.\nPlease check the folder:\n{self.temp_dir}")
+                    return
                 installer_path = exe_files[0]  # Use the first .exe found
             else:
                 installer_path = download_path
-                
+
             # Verify installer exists
             if not os.path.exists(installer_path):
-                raise Exception(f"Installer file missing: {installer_path}")
-                
+                os.startfile(self.temp_dir)
+                messagebox.showerror("Installer Error", f"Installer file missing: {installer_path}\nPlease check the folder:\n{self.temp_dir}")
+                return
+
             print(f"Installer ready: {installer_path}")
                 
             # Get the main application process ID
