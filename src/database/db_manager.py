@@ -8,8 +8,11 @@ class DatabaseManager:
     Handle database operations for the analyzer data
     """
     def __init__(self, db_file=None):
+        # Use LOCALAPPDATA for persistent database storage
+        default_dir = Path(os.getenv('LOCALAPPDATA')) / 'LabSync'
+        default_dir.mkdir(parents=True, exist_ok=True)
         if db_file is None:
-            db_file = Path(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'astm_data.db')
+            db_file = default_dir / 'astm_data.db'
         self.db_file = db_file
         self.conn = None
         self.init_db()

@@ -14,6 +14,7 @@ import asyncio
 import aiohttp
 import zipfile
 import time
+from datetime import datetime, timedelta
 
 class UpdateChecker:
     def __init__(self, current_version="1.0.0", app_window=None):
@@ -40,7 +41,7 @@ class UpdateChecker:
                         raise Exception(f"GitHub API returned status {response.status}")                    
                     data = await response.json()
                     latest_version = data['tag_name'].lstrip('v')
-                    print(f"Latest version: {latest_version}, Current version: {self.current_version}")
+                    print(f"Latest version: {latest_version}, Current version: self.current_version")
                     
                     if self._compare_versions(latest_version, self.current_version) > 0:
                         print("New version available")
@@ -244,8 +245,7 @@ class UpdateChecker:
             app_exe = psutil.Process(app_pid).exe()
             app_name = os.path.basename(app_exe)
             
-            print(f"Application process: PID={app_pid}, EXE={app_name}")
-              # Create update batch script with more robust application termination
+            print(f"Application process: PID={app_pid}, EXE={app_name}")            # Create update batch script with more robust application termination
             batch_path = self.temp_dir / "update.bat"
             
             # Make sure installer path is absolute and quoted properly
@@ -254,9 +254,19 @@ class UpdateChecker:
             with open(batch_path, 'w') as f:
                 f.write('@echo off\n')
                 f.write('setlocal enabledelayedexpansion\n')
+                f.write('color 1F\n')  # Blue background, white text for visibility
                 f.write('title LabSync Updater\n')
                 f.write('echo LabSync Updater\n')
                 f.write('echo ============================\n')
+                f.write('echo.\n')
+                
+                # Make sure this window stays visible
+                f.write(':: Make sure this window is visible\n')
+                f.write('if not "%minimized%"=="" goto :continue\n')
+                f.write('set minimized=true\n')
+                f.write('start /max cmd /c "%~dpnx0"\n')
+                f.write('exit\n')
+                f.write(':continue\n')
                 f.write('echo.\n')
                 
                 # Add a small delay to ensure the parent process has time to exit
@@ -279,31 +289,37 @@ class UpdateChecker:
                 f.write(f'    echo Found other instances of {app_name}, attempting to close them...\n')
                 f.write(f'    taskkill /F /IM "{app_name}" /T > nul 2>&1\n')
                 f.write('    if !ERRORLEVEL! NEQ 0 echo Failed to terminate other instances\n')
-                f.write('    timeout /t 2 /nobreak > nul\n')
+                f.write('    timeout /t 2 /nobreak > nul\n')                
                 f.write(')\n')
                 
                 # Run the installer with proper error handling
                 f.write('echo.\n')
-                f.write(f'echo Installing update from:\n')
+                f.write(f'echo Launching installer from:\n')
                 f.write(f'echo {installer_path_str}\n')
                 f.write('echo.\n')
-                
-                # Use call to prevent batch termination if installer fails
-                f.write(f'call "{installer_path_str}" /VERYSILENT /NORESTART /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS\n')
+                f.write('echo The installer will now open. Please follow the on-screen instructions.\n')
+                f.write('echo This window will wait until the installation is complete.\n')
+                f.write('echo.\n')                # Use START to ensure the installer is visible in a new window
+                f.write('echo Starting installer. This window will wait until installation is complete.\n')
+                f.write('echo.\n')
+                f.write(f'start "LabSync Installer" /wait "{installer_path_str}" /CLOSEAPPLICATIONS\n')
                 f.write('if !ERRORLEVEL! NEQ 0 (\n')
                 f.write('    echo.\n')
-                f.write('    echo Installation failed with error code !ERRORLEVEL!\n')
-                f.write('    echo The installer may have encountered an error.\n')
-                f.write('    echo You may need to run the installer manually.\n')
+                f.write('    echo Installation exited with code !ERRORLEVEL!\n')
+                f.write('    echo The installation may have been canceled or encountered an error.\n')
+                f.write('    echo.\n')
+                f.write('    echo You can try running the installer again manually from:\n')
+                f.write(f'    echo {installer_path_str}\n')
                 f.write('    echo.\n')
                 f.write('    pause\n')
                 f.write('    exit /b !ERRORLEVEL!\n')
                 f.write(')\n')
-                
-                # Success message
+                  # Success message
                 f.write('echo.\n')
-                f.write('echo Update completed successfully!\n')
-                f.write('echo The application will start automatically.\n')
+                f.write('echo Installation completed successfully!\n')
+                f.write('echo The updated application will start automatically after you close this window.\n')
+                f.write('echo.\n')
+                f.write('pause\n')
                 
                 # Try to start the updated application
                 f.write('echo Starting updated application...\n')
@@ -317,12 +333,14 @@ class UpdateChecker:
                 f.write('echo.\n')
                 f.write('echo Cleaning up temporary files...\n')
                 f.write('timeout /t 2 /nobreak > nul\n')
-                f.write('del "%~f0" >nul 2>&1\n')  # Self-delete batch file
-
-            # Display final message to user
+                f.write('del "%~f0" >nul 2>&1\n')  # Self-delete batch file            # Create the direct installer launcher before showing final message
+            direct_launcher_created = self._create_direct_launcher(installer_path)
+            
+            # Display final message to user with interactive installation instructions
             messagebox.showinfo("Update Ready", 
-                                "The update has been downloaded and will now be installed. "
-                                "The application will close during installation.")
+                                "The update has been downloaded and is ready to install.\n\n"
+                                "The application will now close and the installer will open.\n"
+                                "Please follow the on-screen instructions to complete the installation.")
                                 
             # Close all toplevel windows
             for widget in tk._default_root.winfo_children():
@@ -345,39 +363,59 @@ class UpdateChecker:
                                         main_app = frame.master.master
                                         break
                         except:
-                            pass
-              # Launch updater with minimal flags to avoid WinError 87
+                            pass            # Launch updater using the Windows 'start' command to ensure visibility
             print(f"Launching update script: {batch_path}")
+            
+            # Create a direct shortcut to the installer as backup
+            shortcut_path = os.path.join(os.path.expanduser("~"), "Desktop", "LabSync Installer.bat")
             try:
-                # Use a simpler approach with just DETACHED_PROCESS
-                # This allows the batch file to run independently from the parent process
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 1  # SW_SHOWNORMAL
-                
-                update_process = subprocess.Popen(
-                    [str(batch_path)], 
-                    shell=True,
-                    startupinfo=startupinfo,
-                    creationflags=subprocess.DETACHED_PROCESS,
-                    close_fds=True
-                )
-                print(f"Update process started with PID: {update_process.pid}")
+                with open(shortcut_path, 'w') as f:
+                    f.write('@echo off\n')
+                    f.write(f'echo Running LabSync installer from: {installer_path}\n')
+                    f.write(f'start "" "{installer_path}"\n')
+                    f.write('echo Installation started. You can close this window.\n')
+                    f.write('pause\n')
+                    f.write('del "%~f0"\n')  # Self-delete
+                print(f"Created backup installer shortcut at {shortcut_path}")
             except Exception as e:
-                print(f"Error launching updater with DETACHED_PROCESS: {e}")
+                print(f"Could not create backup shortcut: {e}")
+            
+            # Use the Windows START command which is more reliable for launching visible windows
+            try:
+                # Method 1: Use START command with "cmd /c start" to force a new visible window
+                print("Launching batch file using START command")
+                update_process = subprocess.Popen(
+                    f'cmd /c start "LabSync Updater" "{batch_path}"',
+                    shell=True
+                )
+                print("Batch file launched successfully")
+            except Exception as e:
+                print(f"Error launching updater with START command: {e}")
                 try:
-                    # Fallback to simplest possible execution
-                    print("Trying fallback launch method")
+                    # Method 2: Direct execution as visible console
+                    print("Trying direct visible execution")
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = 1  # SW_SHOWNORMAL
+                    
                     update_process = subprocess.Popen(
-                        f'start "" "{batch_path}"',
-                        shell=True
+                        str(batch_path),
+                        shell=True,
+                        startupinfo=startupinfo,
+                        creationflags=subprocess.CREATE_NEW_CONSOLE
                     )
-                    print("Fallback launch completed")
+                    print("Direct execution launched")
                 except Exception as e2:
-                    print(f"Fallback launch failed: {e2}")
+                    print(f"All launch methods failed: {e2}")
                     messagebox.showerror("Update Error", 
                                         f"Failed to launch update process: {e2}\n\n"
-                                        f"You can try running the installer manually from:\n{installer_path}")
+                                        f"You can try running the installer manually from:\n{installer_path}\n\n"
+                                        f"A shortcut has been created on your desktop.")
+                    # Try to open the installer directly as last resort
+                    try:
+                        subprocess.Popen(f'start "" "{installer_path}"', shell=True)
+                    except:
+                        pass
                     return
               # Print update process info for debugging
             if update_process:
@@ -421,25 +459,133 @@ class UpdateChecker:
                     update_process.detach()
             except Exception as e:
                 print(f"Error in final cleanup: {e}")
+              # Exit with a direct method that won't block the update process
+            print("Exiting application immediately to let updater continue...")            # Create a final VBS script that both kills this process AND launches the installer
+            # This is the most reliable method to ensure the installer runs
+            vbs_path = self.temp_dir / "exit_and_install.vbs"
+            with open(vbs_path, 'w') as vbs:
+                vbs.write('Option Explicit\n')
+                vbs.write('Dim WshShell\n')
+                vbs.write('Set WshShell = CreateObject("WScript.Shell")\n')
+                
+                # Kill the application process
+                vbs.write('WScript.Sleep 1000\n')  # Wait 1 second
+                vbs.write(f'WshShell.Run "taskkill /F /PID {os.getpid()} /T", 0, True\n')
+                
+                # Wait another second for process to fully terminate
+                vbs.write('WScript.Sleep 1000\n')
+                
+                # Launch the installer directly with proper path escaping
+                installer_vbs_path = str(installer_path).replace('\\', '\\\\')
+                vbs.write(f'WshShell.Run """{installer_vbs_path}""", 1, False\n')
+                vbs.write('Set WshShell = Nothing\n')
             
-            # Exit in stages to ensure clean shutdown
-            try:
-                print("Exiting application...")
-                # Try sys.exit first for cleaner exit
-                sys.exit(0)
-            except SystemExit:
-                # This is expected
-                pass
-            except Exception as e:
-                print(f"Error during sys.exit: {e}")
-                # Fall back to os._exit as last resort
-                os._exit(0)
-
+            # Launch the VBS script silently
+            subprocess.Popen(['wscript.exe', str(vbs_path)],
+                            shell=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+              # Give the script a chance to run by waiting briefly
+            time.sleep(1.5)
+            
         except Exception as e:
+            print(f"Update process failed with error: {e}")
             messagebox.showerror("Update Error", f"Failed to update: {e}")
-
+    
+    def _create_direct_launcher(self, installer_path):
+        """Create a VBS script that will directly launch the installer
+        This is a reliable method to ensure the installer appears regardless of how the app exits
+        """
+        direct_launcher_path = self.temp_dir / "launch_installer.vbs"
+        
+        # Create three different launch mechanisms to ensure at least one works
+        
+        # 1. VBS script
+        with open(direct_launcher_path, 'w') as f:
+            f.write('Option Explicit\n')
+            f.write('Dim WshShell, installer_path, fso, desktop_path, shortcut_path\n')
+            
+            # Properly escape the path
+            installer_vbs_path = str(installer_path).replace('\\', '\\\\')
+            f.write(f'installer_path = "{installer_vbs_path}"\n')
+            f.write('Set WshShell = CreateObject("WScript.Shell")\n')
+            
+            # Wait for application to close
+            f.write('WScript.Sleep 3000\n')  # Wait 3 seconds
+            
+            # Try different methods to launch the installer
+            f.write('On Error Resume Next\n')
+            
+            # Method 1: Direct Run
+            f.write('WshShell.Run """" & installer_path & """", 1, False\n')
+            f.write('If Err.Number <> 0 Then\n')
+            f.write('    Err.Clear\n')
+            
+            # Method 2: Through cmd
+            f.write('    WshShell.Run "cmd.exe /c start """" """ & installer_path & """", 0, False\n')
+            f.write('End If\n')
+            
+            # Method 3: Create desktop shortcut as fallback
+            f.write('If Err.Number <> 0 Then\n')
+            f.write('    Err.Clear\n')
+            f.write('    Set fso = CreateObject("Scripting.FileSystemObject")\n')
+            f.write('    desktop_path = WshShell.SpecialFolders("Desktop")\n')
+            f.write('    shortcut_path = fso.BuildPath(desktop_path, "LabSync Installer.lnk")\n')
+            f.write('    Set shortcut = WshShell.CreateShortcut(shortcut_path)\n')
+            f.write('    shortcut.TargetPath = installer_path\n')
+            f.write('    shortcut.Save\n')
+            f.write('    WshShell.Popup "The installer has been placed on your desktop.", 10, "LabSync Update", 64\n')
+            f.write('End If\n')
+            
+            f.write('Set WshShell = Nothing\n')
+        
+        # 2. Create a batch file shortcut on desktop as backup
+        try:
+            desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+            batch_path = os.path.join(desktop, "Install LabSync Update.bat")
+            
+            with open(batch_path, 'w') as f:
+                f.write('@echo off\n')
+                f.write('echo Installing LabSync update...\n')
+                f.write(f'start "" "{installer_path}"\n')
+                f.write('if errorlevel 1 (\n')
+                f.write('    echo Failed to start installer.\n')
+                f.write('    echo Please run the installer manually from:\n')
+                f.write(f'    echo {installer_path}\n')
+                f.write('    pause\n')
+                f.write(')\n')
+        except Exception as e:
+            print(f"Failed to create desktop shortcut: {e}")
+        
+        # Launch the VBS script now while the app is still running
+        print(f"Launching direct installer via VBS: {direct_launcher_path}")
+        
+        try:
+            # Launch with all methods
+            subprocess.Popen(['wscript.exe', str(direct_launcher_path)], 
+                           shell=True, 
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+            
+            # Also schedule the installer to be launched directly via Windows Task Scheduler
+            try:
+                # Use a short task name without spaces
+                task_name = "LabSyncUpdateInstall"
+                # Create a task to run in 5 seconds
+                subprocess.Popen([
+                    'schtasks', '/create', '/tn', task_name, '/tr',
+                    f'"{installer_path}"',
+                    '/sc', 'once', '/st', (datetime.now() + timedelta(seconds=5)).strftime('%H:%M:%S'),
+                    '/f'  # Force creation
+                ], shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception as task_err:
+                print(f"Could not schedule task: {task_err}")
+            
+            return True
+        except Exception as e:
+            print(f"Failed to create direct launcher: {e}")
+            return False    
     async def check_updates_periodically(self, interval_hours=24):
         """Check for updates periodically"""
         while True:
             await self.check_for_updates()
-            await asyncio.sleep(interval_hours * 3600)  # Convert hours to seconds
+            # Convert hours to seconds
+            await asyncio.sleep(interval_hours * 3600)
