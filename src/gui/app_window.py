@@ -1102,14 +1102,14 @@ Features:
             if hasattr(self, 'tray_icon') and self.tray_icon:
                 try:
                     self.tray_icon.stop()
-                except:
-                    pass  # Ignore any errors stopping the tray icon
+                except Exception as e:
+                    self.logger.warning(f"Error stopping tray icon: {e}")
             
             # Remove logger callback
             try:
                 self.logger.remove_ui_callback(self._handle_log_message)
-            except:
-                pass  # Ignore errors
+            except Exception as e:
+                self.logger.warning(f"Error removing logger callback: {e}")
             
             # Create event loop for cleanup if needed
             try:
@@ -1148,21 +1148,31 @@ Features:
                 if isinstance(widget, tk.Toplevel):
                     try:
                         widget.destroy()
-                    except:
-                        pass
+                    except Exception as e:
+                        self.logger.warning(f"Error destroying child window: {e}")
             
             # Quit and destroy
             try:
                 self.root.quit()
                 self.root.destroy()
-            except:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Error quitting/destroying root: {e}")
                 
             # Force exit if requested
             if force:
                 self.logger.info("Forcing application exit")
                 import os
-                os._exit(0)
+                import sys
+                try:
+                    # Try to use sys.exit first for a more graceful exit
+                    sys.exit(0)
+                except SystemExit:
+                    # This exception is expected, but we'll catch it to add logging
+                    self.logger.info("sys.exit executed")
+                except Exception as e:
+                    self.logger.error(f"Error during sys.exit: {e}")
+                    # Fall back to os._exit for hard exit
+                    os._exit(0)
                 
         except Exception as e:
             self.logger.error(f"Error during shutdown: {str(e)}\n{traceback.format_exc()}")
@@ -1175,7 +1185,11 @@ Features:
             # Force exit if requested
             if force:
                 import os
-                os._exit(0)
+                import sys
+                try:
+                    sys.exit(0)
+                except:
+                    os._exit(0)
                 
     def _schedule_updates(self):
         """Schedule periodic GUI updates"""
