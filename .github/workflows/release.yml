@@ -99,13 +99,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          
+
+      - name: Inject version into package
+        run: |
+          echo "__version__ = '$env:APP_VERSION'" > src/version.py
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller pillow
-          
+
       - name: Build Windows executable
         run: |
           $env:PYTHONPATH = "$PWD"
@@ -169,13 +173,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          
+
+      - name: Inject version into package
+        run: |
+          echo "__version__ = '$APP_VERSION'" > src/version.py
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-          
+
       - name: Create icns file
         run: |
           mkdir icon.iconset
@@ -183,7 +191,7 @@ jobs:
           sips -s format png src/gui/resources/icon.png -z 256 256 --out icon.iconset/icon_256x256.png
           sips -s format png src/gui/resources/icon.png -z 128 128 --out icon.iconset/icon_128x128.png
           iconutil -c icns icon.iconset -o LabSync.icns
-          
+
       - name: Build macOS app
         run: |
           pyinstaller --name "LabSync" --windowed --onefile --add-data "src/gui/resources:gui/resources" --icon "LabSync.icns" src/main.py

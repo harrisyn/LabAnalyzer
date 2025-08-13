@@ -8,11 +8,17 @@ from pathlib import Path
 CONFIG_FILE = 'config.json'
 
 class Config:
+    def get_config_path(self):
+        """Return the path to the config file as a string"""
+        return str(self.config_path)
     """
     Handles reading and writing to the application configuration file
     """
     def __init__(self, config_path=None):
-        self.config_path = config_path or Path(os.path.dirname(os.path.abspath(__file__)), '..', '..', CONFIG_FILE)
+        # Use LOCALAPPDATA for persistent config storage
+        default_dir = Path(os.getenv('LOCALAPPDATA')) / 'LabSync'
+        default_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path = config_path or (default_dir / CONFIG_FILE)
         self.config = self._load_config()
     
     def _load_config(self):
@@ -33,6 +39,7 @@ class Config:
     def _create_default_config(self):
         """Create a default configuration"""
         return {
+            "version": "1.0.0",
             "port": 5000,
             "app_name": "LabSync",
             "instance_id": "LABSYNC-001",
