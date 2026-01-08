@@ -325,114 +325,44 @@ class UpdateChecker:
                 if latest_version:
                     self._set_last_downloaded_info(latest_version, installer_path)
                 
-            # Get the main application process ID
-            import psutil
-            app_pid = os.getpid()
-            app_exe = psutil.Process(app_pid).exe()
-            app_name = os.path.basename(app_exe)
+            print(f"Installer ready: {installer_path}")
             
-            print(f"Application process: PID={app_pid}, EXE={app_name}")
-              # Create update batch script with more robust application termination
-            batch_path = self.temp_dir / "update.bat"
+            # Record last downloaded info
+            if latest_version:
+                self._set_last_downloaded_info(latest_version, installer_path)
             
-            # Make sure installer path is absolute and quoted properly
-            installer_path_str = str(installer_path)
-            installer_path_str_quoted = f'"{installer_path_str}"'
-
-            # Detect correct Program Files path for post-install launch
-            program_files = os.environ.get('ProgramFiles', r'C:\Program Files')
-            program_files_x86 = os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')
-            # Try both possible install locations
-            possible_exe_paths = [
-                os.path.join(program_files, 'LabSync', 'LabSync.exe'),
-                os.path.join(program_files_x86, 'LabSync', 'LabSync.exe')
-            ]
-
-            with open(batch_path, 'w') as f:
-                f.write('@echo off\n')
-                f.write('setlocal enabledelayedexpansion\n')
-                f.write('title LabSync Updater\n')
-                f.write('echo LabSync Updater\n')
-                f.write('echo ============================\n')
-                f.write('echo.\n')
-
-                # Add a small delay to ensure the parent process has time to exit
-                f.write('echo Waiting for application to close...\n')
-                f.write('timeout /t 5 /nobreak > nul\n')
-
-                # Check if the process is still running by PID
-                f.write(f'tasklist /FI "PID eq {app_pid}" 2>nul | find "{app_pid}" >nul\n')
-                f.write('if !ERRORLEVEL! EQU 0 (\n')
-                f.write(f'    echo Process {app_pid} is still running, attempting to close it...\n')
-                f.write(f'    taskkill /F /PID {app_pid} /T > nul 2>&1\n')
-                f.write('    if !ERRORLEVEL! NEQ 0 echo Failed to terminate process {app_pid}\n')
-                f.write('    timeout /t 2 /nobreak > nul\n')
-                f.write(')\n')
-
-                # Also look for any instances by executable name
-                f.write(f'echo Checking for other instances of {app_name}...\n')
-                f.write(f'tasklist /FI "IMAGENAME eq {app_name}" 2>nul | find "{app_name}" >nul\n')
-                f.write('if !ERRORLEVEL! EQU 0 (\n')
-                f.write(f'    echo Found other instances of {app_name}, attempting to close them...\n')
-                f.write(f'    taskkill /F /IM "{app_name}" /T > nul 2>&1\n')
-                f.write('    if !ERRORLEVEL! NEQ 0 echo Failed to terminate other instances\n')
-                f.write('    timeout /t 2 /nobreak > nul\n')
-                f.write(')\n')
-
-                # Run the installer with elevation using PowerShell
-                f.write('echo.\n')
-                f.write(f'echo Installing update from:\n')
-                f.write(f'echo {installer_path_str}\n')
-                f.write(f'if not exist {installer_path_str_quoted} (\n')
-                f.write('    echo ERROR: Installer not found!\n')
-                f.write('    pause\n')
-                f.write('    exit /b 1\n')
-                f.write(')\n')
-                f.write('echo Launching installer with elevation...\n')
-                f.write(f'powershell -Command "Start-Process {installer_path_str_quoted} -Verb RunAs"\n')
-                f.write('echo Installer launch attempted.\n')
-                f.write('pause\n')
-                f.write('if !ERRORLEVEL! NEQ 0 (\n')
-                f.write('    echo.\n')
-                f.write('    echo Installation failed with error code !ERRORLEVEL!\n')
-                f.write('    echo The installer may have encountered an error.\n')
-                f.write('    echo You may need to run the installer manually.\n')
-                f.write('    echo.\n')
-                f.write('    pause\n')
-                f.write('    exit /b !ERRORLEVEL!\n')
-                f.write(')\n')
-
-                # Success message
-                f.write('echo.\n')
-                f.write('echo Update completed successfully!\n')
-                f.write('echo The application will start automatically.\n')
-
-                # Try to start the updated application from both possible install locations
-                f.write('echo Starting updated application...\n')
-                for exe_path in possible_exe_paths:
-                    exe_path_quoted = f'"{exe_path}"'
-                    f.write(f'if exist {exe_path_quoted} start "" {exe_path_quoted} 2>nul\n')
-                f.write('if !ERRORLEVEL! NEQ 0 (\n')
-                f.write('    echo Unable to automatically start the application.\n')
-                f.write('    echo Please start it manually from the Start Menu.\n')
-                f.write(')\n')
-
-                # Clean up
-                f.write('echo.\n')
-                f.write('echo Cleaning up temporary files...\n')
-                f.write('timeout /t 2 /nobreak > nul\n')
-                f.write('del "%~f0" >nul 2>&1\n')  # Self-delete batch file
-
-            # Display final message to user
+            # Display message to user
             messagebox.showinfo("Update Ready", 
-                                "The update has been downloaded and will now be installed. "
-                                "The application will close during installation.")
-                                
+                                "The update has been downloaded. The application will now close and the installer will start.\n\n"
+                                "Please follow the installer instructions.")
+            
             # Close all toplevel windows
             for widget in tk._default_root.winfo_children():
                 if isinstance(widget, tk.Toplevel):
                     widget.destroy()
-                    
+
+            # Launch installer directly
+            print(f"Launching installer: {installer_path}")
+            try:
+                # Use os.startfile to launch the installer (handles UAC if needed by the installer itself)
+                os.startfile(str(installer_path))
+                print("Installer launched successfully.")
+            except Exception as e:
+                print(f"Failed to launch installer: {e}")
+                # Try fallback with subprocess
+                try:
+                    subprocess.Popen([str(installer_path)], shell=True)
+                    print("Installer launched via subprocess.")
+                except Exception as e2:
+                    messagebox.showerror("Update Error", f"Failed to start installer: {e}\n\nPlease run it manually from:\n{installer_path}")
+                    return
+            
+            # Allow the update process to start properly before exiting the app
+            time.sleep(1)
+            
+            # Display a final message before exiting
+            print("Update process launched successfully. Shutting down application...")
+            
             # Get main application instance to call clean shutdown
             main_app = self.app_window  # Use direct reference if provided in constructor
             
@@ -450,48 +380,6 @@ class UpdateChecker:
                                         break
                         except:
                             pass
-              # Launch updater with minimal flags to avoid WinError 87
-            print(f"Launching update script: {batch_path}")
-            try:
-                # Use a simpler approach with just DETACHED_PROCESS
-                # This allows the batch file to run independently from the parent process
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 1  # SW_SHOWNORMAL
-                
-                update_process = subprocess.Popen(
-                    [str(batch_path)], 
-                    shell=True,
-                    startupinfo=startupinfo,
-                    creationflags=subprocess.DETACHED_PROCESS,
-                    close_fds=True
-                )
-                print(f"Update process started with PID: {update_process.pid}")
-            except Exception as e:
-                print(f"Error launching updater with DETACHED_PROCESS: {e}")
-                try:
-                    # Fallback to simplest possible execution
-                    print("Trying fallback launch method")
-                    update_process = subprocess.Popen(
-                        f'start "" "{batch_path}"',
-                        shell=True
-                    )
-                    print("Fallback launch completed")
-                except Exception as e2:
-                    print(f"Fallback launch failed: {e2}")
-                    messagebox.showerror("Update Error", 
-                                        f"Failed to launch update process: {e2}\n\n"
-                                        f"You can try running the installer manually from:\n{installer_path}")
-                    return
-              # Print update process info for debugging
-            if update_process:
-                print(f"Started update process with PID: {update_process.pid if hasattr(update_process, 'pid') else 'unknown'}")
-            
-            # Allow the update process to start properly before exiting the app
-            time.sleep(1)
-            
-            # Display a final message before exiting
-            print("Update process launched successfully. Shutting down application...")
             
             # Try to properly close via app method if available
             if main_app and hasattr(main_app, 'quit_application'):
@@ -519,10 +407,6 @@ class UpdateChecker:
                 # Close any open files
                 for handler in list(logging.getLogger().handlers):
                     handler.close()
-                
-                # Detach update process to ensure it continues
-                if update_process and hasattr(update_process, 'detach'):
-                    update_process.detach()
             except Exception as e:
                 print(f"Error in final cleanup: {e}")
             

@@ -172,5 +172,37 @@ After applying these patches:
 [Port:5000|MINDRAY_BS_430] Processing Observation Request segment
 [Port:5000|MINDRAY_BS_430] Processing Observation Result segment (x17)
 [Port:5000|MINDRAY_BS_430] Patient stored with DB ID: 1
-[Port:5000|MINDRAY_BS_430] Stored patient: TIMOTHY WORLANYO (ID: 322288)
-```
+
+---
+
+## Patch 3: Single Instance Application Lock
+
+### File: `src/utils/single_instance.py`
+- Created new utility checking for existing instances via socket binding on port 44444.
+- Implemented Windows window focusing using `ctypes` to bring existing instance to front.
+- Implemented Mac window focusing using `osascript`.
+
+### File: `src/main.py`
+- Integrated `SingleInstanceChecker` at startup.
+- Prevent launch if another instance is detected.
+
+### Testing
+1. Launch application.
+2. Try to launch application again.
+
+---
+
+## Patch 4: Simplified Updater Logic
+
+### File: `src/utils/updater.py`
+- Removed complex batch file generation (`update.bat`) which was prone to failure and permission issues.
+- Removed aggressive process termination logic (taskkill).
+- Implemented direct installer launch using `os.startfile`.
+- Removed forced administrator elevation (`RunAs`), allowing installer to handle privileges.
+- Ensured application exits immediately after launching installer.
+
+### Testing
+1. Trigger an update (requires available update on GitHub).
+2. Updater should download the installer.
+3. Updater should launch the installer and close the application immediately.
+4. Installer runs independently.

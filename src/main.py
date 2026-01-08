@@ -22,6 +22,7 @@ if __package__ is None:
     from src.network.tcp_server import TCPServer
     from src.network.sync_manager import SyncManager
     from src.gui.app_window import ApplicationWindow
+    from src.utils.single_instance import SingleInstanceChecker
 else:
     # Use relative imports when running as a package
     from .utils.config import Config
@@ -31,6 +32,7 @@ else:
     from .network.tcp_server import TCPServer
     from .network.sync_manager import SyncManager
     from .gui.app_window import ApplicationWindow
+    from .utils.single_instance import SingleInstanceChecker
 
 # Enable nested event loops
 nest_asyncio.apply()
@@ -48,13 +50,23 @@ async def setup_application():
     sync_manager = None
     app = None
     root = None
+    instance_checker = None
     
     try:
         config = Config()
         # Always update config version to match build version
         config.update(version=build_version)
 
-        logger = Logger(name=config.get("app_name", "LabSync"))
+        # Check for existing instance
+        app_name = config.get("app_name", "LabSync")
+        instance_checker = SingleInstanceChecker(app_name=app_name)
+        
+        if instance_checker.is_another_instance_running():
+            print(f"Another instance of {app_name} is already running.")
+            instance_checker.focus_existing_window()
+            sys.exit(0)
+
+        logger = Logger(name=app_name)
         logger.info(f"Initializing core application components... Version: {build_version}")
 
         # Initialize database manager
@@ -93,7 +105,8 @@ async def setup_application():
         # Attach GUI callback to server after creation
         tcp_server.gui_callback = app
 
-        return root, config, logger, db_manager, tcp_server, sync_manager, app, loop
+        # Return instance_checker to keep it alive (holding the socket)
+        return root, config, logger, db_manager, tcp_server, sync_manager, app, loop, instance_checker
 
     except Exception as e:
         # Clean up any created resources on error
@@ -149,7 +162,7 @@ def main():
         asyncio.set_event_loop(loop)
 
         # Initialize all components
-        root, config, logger, db_manager, tcp_server, sync_manager, app, app_loop = \
+        root, config, logger, db_manager, tcp_server, sync_manager, app, app_loop, instance_checker = \
             loop.run_until_complete(setup_application())
 
         # Add watchdog timer to detect freezes
