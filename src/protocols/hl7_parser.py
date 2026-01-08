@@ -26,7 +26,7 @@ class HL7Parser(BaseParser):
         'EVN': 'Event Type',
     }
     
-    def __init__(self, db_manager, logger, gui_callback=None):
+    def __init__(self, db_manager, logger, gui_callback=None, config=None):
         """
         Initialize the parser
         
@@ -34,8 +34,10 @@ class HL7Parser(BaseParser):
             db_manager: DatabaseManager instance for storing parsed data
             logger: Logger instance for logging events
             gui_callback: Optional callback function for GUI updates
+            config: Configuration dictionary
         """
         super().__init__(db_manager, logger)
+        self.config = config or {}
         self.current_patient_id = None
         self.current_message_id = 0
         self.current_raw_message = None
@@ -134,7 +136,10 @@ class HL7Parser(BaseParser):
                 
             elif segment_type == 'OBR':
                 self.log_info("Processing Observation Request segment")
-                # Observation request processing would go here
+                # Extract sample/specimen ID from OBR
+                order_info = self._extract_order_info(fields)
+                if order_info.get('sample_id'):
+                    patient_info['sample_id'] = order_info['sample_id']
                 
             elif segment_type == 'OBX':
                 self.log_info("Processing Observation Result segment")
@@ -153,7 +158,9 @@ class HL7Parser(BaseParser):
                 patient_info['sex'],
                 patient_info['physician'],
                 full_payload,
-                patient_info['sample_id']
+                patient_info['sample_id'],
+                listener_port=self.listener_port,
+                listener_name=self.listener_name
             )
             
             if db_patient_id:
@@ -206,9 +213,12 @@ class HL7Parser(BaseParser):
             # For Mindray BS-430, typical PID segment format:
             # PID|1||patient_id||patient_name||DOB|Sex||||address||||physician
             
-            patient_id = fields[3].strip() if len(fields) > 3 else ""
+           # Try field 2 first (External ID), then field 3 (Internal ID)
+            patient_id = fields[2].strip() if len(fields) > 2 and fields[2].strip() else ""
+            if not patient_id:
+                patient_id = fields[3].strip() if len(fields) > 3 else ""
             
-            # In HL7, sample_id is often in OBR segment, using a placeholder here
+            # Sample ID will be extracted from OBR segment
             sample_id = ""
             
             # Extract name (in HL7 typically in field 5)
@@ -266,7 +276,27 @@ class HL7Parser(BaseParser):
                 "physician": "",
                 "address": ""
             }
-    
+    def _extract_order_info(self, fields):
+        """
+        Extract order/sample information from an OBR segment
+        
+        Args:
+            fields: The split fields of an OBR segment
+            
+        Returns:
+            Dictionary with order information
+        """
+        try:
+            # OBR segment format:
+            # OBR|set_id|placer_order|filler_order|universal_service_id|...
+            # Field 3 contains Filler Order Number (sample/specimen ID)
+            sample_id = fields[3].strip() if len(fields) > 3 else ""
+            
+            return {"sample_id": sample_id}
+        except Exception as e:
+            self.log_error(f"Error extracting order info: {e}")
+            return {}
+            
     def _extract_result(self, fields):
         """
         Extract result information from an OBX segment

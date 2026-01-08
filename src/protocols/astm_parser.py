@@ -491,7 +491,9 @@ class ASTMParser(BaseParser):
                     message_info['sex'],
                     message_info['physician'],
                     message_info['raw_payload'],
-                    message_info['sample_id']
+                    message_info['sample_id'],
+                    listener_port=self.listener_port,
+                    listener_name=self.listener_name
                 )
                 
                 self.log_info(f"Patient stored with DB ID: {patient_db_id}")
