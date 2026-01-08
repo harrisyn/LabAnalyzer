@@ -25,13 +25,14 @@ class ResponseParser(BaseParser):
     # Message format identifiers
     MESSAGE_TYPES = {
         'HEADER': 'Message Header',
-        'PATIENT': 'Patient Information',
-        'RESULT': 'Test Result',
-        'COMMENT': 'Comment Information',
+        'PATIENT': 'Patient Record',
+        'ORDER': 'Order Record',
+        'RESULT': 'Result Record',
+        'COMMENT': 'Comment Record',
         'END': 'End of Message'
     }
     
-    def __init__(self, db_manager, logger, gui_callback=None):
+    def __init__(self, db_manager, logger, gui_callback=None, config=None):
         """
         Initialize the parser
         
@@ -39,16 +40,14 @@ class ResponseParser(BaseParser):
             db_manager: DatabaseManager instance for storing parsed data
             logger: Logger instance for logging events
             gui_callback: Optional callback function for GUI updates
+            config: Configuration object
         """
-        super().__init__(db_manager, logger)
-        self.current_patient_id = None
-        self.message_id = 0
-        self.current_raw_message = None
-        self.full_message_payload = []
+        super().__init__(db_manager, logger, config=config)
+        self.message_state = "WAITING"  # States: WAITING, IN_MESSAGE
         self.gui_callback = gui_callback
         self.sync_manager = None
-        # The RESPONSE 920 might use a different message format
-        self.message_state = "WAITING"  # States: WAITING, IN_MESSAGE
+        self.current_patient_id = None
+        self.full_message_payload = []
         
     def set_sync_manager(self, sync_manager):
         """

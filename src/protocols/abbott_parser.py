@@ -30,12 +30,8 @@ class AbbottParser(BaseParser):
     ENQ = b'\x05'  # Enquiry
     ACK = b'\x06'  # Acknowledge
     NAK = b'\x15'  # Negative Acknowledge
-    FS = b'\x1C'   # Field Separator
-    CR = b'\x0D'   # Carriage Return
-    LF = b'\x0A'   # Line Feed
-    CRLF = CR + LF
     
-    def __init__(self, db_manager, logger, gui_callback=None):
+    def __init__(self, db_manager, logger, gui_callback=None, config=None):
         """
         Initialize the parser
         
@@ -43,11 +39,11 @@ class AbbottParser(BaseParser):
             db_manager: DatabaseManager instance for storing parsed data
             logger: Logger instance for logging events
             gui_callback: Optional callback function for GUI updates
+            config: Configuration object
         """
-        super().__init__(db_manager, logger)
-        self.current_patient_id = None
-        self.xml_buffer = []
+        super().__init__(db_manager, logger, config=config)
         self.in_message = False
+        self.xml_buffer = []
         self.gui_callback = gui_callback
         self.sync_manager = None
         self.message_id = 0

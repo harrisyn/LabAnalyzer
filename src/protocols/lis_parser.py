@@ -30,7 +30,7 @@ class LISParser(BaseParser):
         'L': 'Terminator'
     }
     
-    def __init__(self, db_manager, logger, gui_callback=None):
+    def __init__(self, db_manager, logger, gui_callback=None, config=None):
         """
         Initialize the parser
         
@@ -38,10 +38,10 @@ class LISParser(BaseParser):
             db_manager: DatabaseManager instance for storing parsed data
             logger: Logger instance for logging events
             gui_callback: Optional callback function for GUI updates
+            config: Configuration object
         """
-        super().__init__(db_manager, logger)
+        super().__init__(db_manager, logger, config=config)
         self.current_patient_id = None
-        self.current_frame_number = 0
         self.current_raw_record = None
         self.full_message_payload = []
         self.gui_callback = gui_callback

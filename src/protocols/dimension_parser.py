@@ -41,26 +41,22 @@ class DimensionParser(BaseParser):
         'A': 'Abnormal',
         'N': 'Normal',
         'I': 'Inconclusive',
-        'E': 'Equipment Error',
-        'R': 'Repeat Test Required',
-        'X': 'Test Aborted',
-        'D': 'Dilution Required'
     }
     
-    def __init__(self, db_manager, logger, gui_callback=None):
+    def __init__(self, db_manager, logger, gui_callback=None, config=None):
         """
-        Initialize the Dimension parser
+        Initialize the parser
         
         Args:
             db_manager: DatabaseManager instance for storing parsed data
             logger: Logger instance for logging events
             gui_callback: Optional callback function for GUI updates
+            config: Configuration object
         """
-        super().__init__(db_manager, logger)
+        super().__init__(db_manager, logger, config=config)
         self.current_patient_id = None
         self.current_sample_id = None
-        self.current_frame_number = 0
-        self.frame_expected = 0
+        self.frame_expected = 1
         self.message_expected = False
         self.gui_callback = gui_callback
         self.sync_manager = None
