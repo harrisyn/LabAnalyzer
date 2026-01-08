@@ -8,89 +8,6 @@ import re
 from datetime import datetime
 from ..utils.analyzers import AnalyzerDefinitions
 
-class ListenerDialog(tk.Toplevel):
-    """Dialog to add or edit a listener configuration"""
-    def __init__(self, parent, listener_data=None):
-        super().__init__(parent)
-        self.title("Listener Configuration")
-        self.geometry("400x300")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-        
-        self.result = None
-        self.listener_data = listener_data or {}
-        
-        self._create_widgets()
-        self._center_window()
-        
-    def _center_window(self):
-        self.update_idletasks()
-        width = self.winfo_width()
-        height = self.winfo_height()
-        x = (self.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.winfo_screenheight() // 2) - (height // 2)
-        self.geometry(f'+{x}+{y}')
-
-    def _create_widgets(self):
-        main_frame = ttk.Frame(self, padding="20")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Port
-        ttk.Label(main_frame, text="Port:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.port_var = tk.StringVar(value=str(self.listener_data.get("port", "5000")))
-        port_entry = ttk.Entry(main_frame, textvariable=self.port_var, width=10)
-        port_entry.grid(row=0, column=1, sticky=tk.W, pady=5)
-        
-        # Analyzer Type
-        ttk.Label(main_frame, text="Analyzer Type:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.analyzer_type_var = tk.StringVar(value=self.listener_data.get("analyzer_type", AnalyzerDefinitions.SYSMEX_XN_L))
-        analyzer_combo = ttk.Combobox(main_frame, textvariable=self.analyzer_type_var, 
-                                    values=AnalyzerDefinitions.get_supported_analyzers(), width=25)
-        analyzer_combo.grid(row=1, column=1, sticky=tk.W, pady=5)
-        analyzer_combo.bind("<<ComboboxSelected>>", self._on_analyzer_changed)
-        
-        # Protocol
-        ttk.Label(main_frame, text="Protocol:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        self.protocol_var = tk.StringVar(value=self.listener_data.get("protocol", AnalyzerDefinitions.PROTOCOL_ASTM))
-        protocol_combo = ttk.Combobox(main_frame, textvariable=self.protocol_var, 
-                                    values=AnalyzerDefinitions.get_supported_protocols(), width=25)
-        protocol_combo.grid(row=2, column=1, sticky=tk.W, pady=5)
-        
-        # Name (Optional)
-        ttk.Label(main_frame, text="Name (Optional):").grid(row=3, column=0, sticky=tk.W, pady=5)
-        self.name_var = tk.StringVar(value=self.listener_data.get("name", ""))
-        name_entry = ttk.Entry(main_frame, textvariable=self.name_var, width=25)
-        name_entry.grid(row=3, column=1, sticky=tk.W, pady=5)
-        
-        # Buttons
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.grid(row=4, column=0, columnspan=2, pady=20)
-        
-        ttk.Button(btn_frame, text="OK", command=self._save).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.LEFT, padx=5)
-        
-    def _on_analyzer_changed(self, event):
-        analyzer = self.analyzer_type_var.get()
-        protocol = AnalyzerDefinitions.get_protocol_for_analyzer(analyzer)
-        self.protocol_var.set(protocol)
-        
-    def _save(self):
-        try:
-            port = int(self.port_var.get())
-            if port < 1 or port > 65535:
-                raise ValueError("Port must be between 1 and 65535")
-                
-            self.result = {
-                "port": port,
-                "analyzer_type": self.analyzer_type_var.get(),
-                "protocol": self.protocol_var.get(),
-                "name": self.name_var.get() or f"{self.analyzer_type_var.get()} ({port})"
-            }
-            self.destroy()
-        except ValueError as e:
-            messagebox.showerror("Invalid Input", str(e))
-
 class ConfigDialog(tk.Toplevel):
     # Constants
     COMBOBOX_SELECTED = "<<ComboboxSelected>>"
@@ -100,13 +17,10 @@ class ConfigDialog(tk.Toplevel):
         self.config = config
         self.result = None
         
-        # Initialize local copy of listeners
-        self.local_listeners = [dict(l) for l in self.config.get_listeners()]
-        
         # Window setup
         self.title("Configuration Settings")
-        self.geometry("600x700")  # Made wider and taller
-        self.resizable(True, True)
+        self.geometry("500x600")  # Made taller to accommodate all settings
+        self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
         
@@ -130,7 +44,7 @@ class ConfigDialog(tk.Toplevel):
         self._create_basic_widgets()
         self._create_server_widgets()
         
-        # Create buttons at the bottom
+        # Create buttons at the bottom - now in a separate frame below the main container
         button_frame = ttk.Frame(self)
         button_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
         
@@ -155,125 +69,47 @@ class ConfigDialog(tk.Toplevel):
         main_frame = ttk.Frame(self.basic_tab, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Application Settings
-        app_frame = ttk.LabelFrame(main_frame, text="Application Settings", padding="5")
-        app_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Basic settings
+        basic_frame = ttk.LabelFrame(main_frame, text="Application Settings", padding="5")
+        basic_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Port
+        ttk.Label(basic_frame, text="Port:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
+        self.port_var = tk.StringVar(value=str(self.config.get("port", 5000)))
+        port_entry = ttk.Entry(basic_frame, textvariable=self.port_var, width=10)
+        port_entry.grid(row=0, column=1, sticky=tk.W, padx=5, pady=2)
         
         # Application name
-        ttk.Label(app_frame, text="Application Name:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(basic_frame, text="Application Name:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
         self.app_name_var = tk.StringVar(value=self.config.get("app_name", "Basic Analyzer"))
-        app_name_entry = ttk.Entry(app_frame, textvariable=self.app_name_var, width=30)
-        app_name_entry.grid(row=0, column=1, sticky=tk.W, padx=5, pady=2)
+        app_name_entry = ttk.Entry(basic_frame, textvariable=self.app_name_var, width=30)
+        app_name_entry.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
+        
+        # Analyzer Type
+        ttk.Label(basic_frame, text="Analyzer Type:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=2)
+        self.analyzer_type_var = tk.StringVar(value=self.config.get("analyzer_type", AnalyzerDefinitions.SYSMEX_XN_L))
+        analyzer_type_combo = ttk.Combobox(basic_frame, textvariable=self.analyzer_type_var, 
+                                         values=AnalyzerDefinitions.get_supported_analyzers(), width=20)
+        analyzer_type_combo.grid(row=3, column=1, sticky=tk.W, padx=5, pady=2)
+        analyzer_type_combo.bind(self.COMBOBOX_SELECTED, self._on_analyzer_type_changed)
+        
+        # Protocol
+        ttk.Label(basic_frame, text="Protocol:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=2)
+        self.protocol_var = tk.StringVar(value=self.config.get("protocol", AnalyzerDefinitions.PROTOCOL_ASTM))
+        protocol_combo = ttk.Combobox(basic_frame, textvariable=self.protocol_var, 
+                                    values=AnalyzerDefinitions.get_supported_protocols(), width=20)
+        protocol_combo.grid(row=4, column=1, sticky=tk.W, padx=5, pady=2)
         
         # Auto-start option
         self.auto_start_var = tk.BooleanVar(value=self.config.get("auto_start", False))
-        auto_start_check = ttk.Checkbutton(app_frame, text="Auto-start server", variable=self.auto_start_var)
-        auto_start_check.grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
-
-        # Listeners Settings
-        listeners_frame = ttk.LabelFrame(main_frame, text="Configured Listeners", padding="5")
-        listeners_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        auto_start_check = ttk.Checkbutton(basic_frame, text="Auto-start server", variable=self.auto_start_var)
+        auto_start_check.grid(row=5, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
         
-        # Buttons for listeners (Pack FIRST to ensure visibility)
-        btn_frame = ttk.Frame(listeners_frame)
-        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+    def _on_analyzer_type_changed(self, event):
+        """Handle analyzer type selection change"""
+        analyzer_type = self.analyzer_type_var.get()
+        self.protocol_var.set(AnalyzerDefinitions.get_protocol_for_analyzer(analyzer_type))
         
-        ttk.Button(btn_frame, text="Add Listener", command=self._add_listener).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(btn_frame, text="Edit", command=self._edit_listener).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(btn_frame, text="Remove", command=self._remove_listener).pack(side=tk.RIGHT, padx=2)
-
-        # Treeview for listeners
-        columns = ("Port", "Analyzer", "Protocol", "Name")
-        self.listeners_tree = ttk.Treeview(listeners_frame, columns=columns, show="headings", selectmode="browse")
-        
-        self.listeners_tree.heading("Port", text="Port")
-        self.listeners_tree.heading("Analyzer", text="Analyzer")
-        self.listeners_tree.heading("Protocol", text="Protocol")
-        self.listeners_tree.heading("Name", text="Name")
-        
-        self.listeners_tree.column("Port", width=60)
-        self.listeners_tree.column("Analyzer", width=150)
-        self.listeners_tree.column("Protocol", width=100)
-        self.listeners_tree.column("Name", width=150)
-        
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(listeners_frame, orient=tk.VERTICAL, command=self.listeners_tree.yview)
-        self.listeners_tree.configure(yscrollcommand=scrollbar.set)
-        
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.listeners_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        self._refresh_listeners_list()
-        
-    def _refresh_listeners_list(self):
-        """Refresh the listeners treeview"""
-        for item in self.listeners_tree.get_children():
-            self.listeners_tree.delete(item)
-            
-        for listener in self.local_listeners:
-            self.listeners_tree.insert("", tk.END, values=(
-                listener.get("port"),
-                listener.get("analyzer_type"),
-                listener.get("protocol"),
-                listener.get("name", "")
-            ))
-            
-    def _add_listener(self):
-        dialog = ListenerDialog(self)
-        self.wait_window(dialog)
-        
-        if dialog.result:
-            # Check for duplicate ports
-            for l in self.local_listeners:
-                if l["port"] == dialog.result["port"]:
-                    messagebox.showerror("Error", f"Port {l['port']} is already configured.")
-                    return
-            
-            self.local_listeners.append(dialog.result)
-            self._refresh_listeners_list()
-            
-    def _edit_listener(self):
-        selection = self.listeners_tree.selection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a listener to edit.")
-            return
-            
-        item = self.listeners_tree.item(selection[0])
-        values = item["values"]
-        port = values[0]
-        
-        # Find listener data
-        listener_data = next((l for l in self.local_listeners if str(l["port"]) == str(port)), None)
-        if not listener_data:
-            return
-            
-        dialog = ListenerDialog(self, listener_data)
-        self.wait_window(dialog)
-        
-        if dialog.result:
-            # Remove old and add new (in case port changed, check duplicates)
-            if dialog.result["port"] != listener_data["port"]:
-                 for l in self.local_listeners:
-                    if l["port"] == dialog.result["port"]:
-                        messagebox.showerror("Error", f"Port {l['port']} is already configured.")
-                        return
-            
-            # Update in place
-            listener_data.update(dialog.result)
-            self._refresh_listeners_list()
-            
-    def _remove_listener(self):
-        selection = self.listeners_tree.selection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select a listener to remove.")
-            return
-            
-        if messagebox.askyesno("Confirm", "Are you sure you want to remove this listener?"):
-            item = self.listeners_tree.item(selection[0])
-            port = item["values"][0]
-            self.local_listeners = [l for l in self.local_listeners if str(l["port"]) != str(port)]
-            self._refresh_listeners_list()
-
     def _create_server_widgets(self):
         """Create server and sync settings widgets"""
         main_frame = ttk.Frame(self.server_tab, padding="10")
@@ -592,9 +428,19 @@ class ConfigDialog(tk.Toplevel):
     def _save(self):
         """Save the configuration"""
         try:
-            # Validate listeners
-            if not self.local_listeners:
-                messagebox.showwarning("Warning", "No listeners configured. The server will not listen on any port.")
+            # Basic validation
+            analyzer_type = self.analyzer_type_var.get()
+            protocol = self.protocol_var.get()
+            port = int(self.port_var.get())
+            
+            # Verify analyzer and protocol compatibility
+            correct_protocol = AnalyzerDefinitions.get_protocol_for_analyzer(analyzer_type)
+            if protocol != correct_protocol:
+                messagebox.showwarning(
+                    "Configuration Warning", 
+                    f"{analyzer_type} typically uses {correct_protocol} protocol. " +
+                    "Your selection may not work correctly."
+                )
             
             # Validate sync settings
             self._validate_sync_settings()
@@ -618,8 +464,10 @@ class ConfigDialog(tk.Toplevel):
                 
             # Update configuration
             self.config.update(
-                listeners=self.local_listeners,
+                port=port,
                 app_name=self.app_name_var.get(),
+                analyzer_type=analyzer_type,
+                protocol=protocol,
                 auto_start=self.auto_start_var.get(),
                 external_server=external_server_config
             )

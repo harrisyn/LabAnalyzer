@@ -35,8 +35,6 @@ class DatabaseManager:
                     physician TEXT,
                     raw_data TEXT,
                     sync_status TEXT DEFAULT 'local',
-                    listener_port INTEGER,
-                    listener_name TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -72,14 +70,6 @@ class DatabaseManager:
             if 'sample_id' not in columns:
                 cursor.execute('ALTER TABLE patients ADD COLUMN sample_id TEXT')
                 self.log_info("Added sample_id column to patients table")
-                
-            if 'listener_port' not in columns:
-                cursor.execute('ALTER TABLE patients ADD COLUMN listener_port INTEGER')
-                self.log_info("Added listener_port column to patients table")
-                
-            if 'listener_name' not in columns:
-                cursor.execute('ALTER TABLE patients ADD COLUMN listener_name TEXT')
-                self.log_info("Added listener_name column to patients table")
 
             # Check if sequence column exists in results table
             cursor.execute("PRAGMA table_info(results)")
@@ -143,17 +133,12 @@ class DatabaseManager:
         """Context manager exit"""
         self.close()
     
-    def add_patient(self, patient_id, name, dob, sex, physician, raw_data=None, sample_id=None, 
-                     listener_port=None, listener_name=None):
+    def add_patient(self, patient_id, name, dob, sex, physician, raw_data=None, sample_id=None):
         """
         Add a patient to the database with optional raw data and sample ID.
         If an existing patient is found, update their information.
         
         If patient_id is empty but sample_id is provided, use sample_id as patient_id
-        
-        Args:
-            listener_port: Port number of the listener that received this data
-            listener_name: Name of the listener that received this data
         """
         try:
             conn = self._ensure_connection()
@@ -213,14 +198,6 @@ class DatabaseManager:
                 if sample_id is not None:
                     update_fields.append("sample_id = ?")
                     update_values.append(sample_id)
-                    
-                if listener_port is not None:
-                    update_fields.append("listener_port = ?")
-                    update_values.append(listener_port)
-                    
-                if listener_name is not None:
-                    update_fields.append("listener_name = ?")
-                    update_values.append(listener_name)
                 
                 # Only update if we have fields to update
                 if update_fields:
@@ -237,9 +214,9 @@ class DatabaseManager:
                 # Insert new patient
                 cursor.execute('''
                     INSERT INTO patients 
-                    (patient_id, sample_id, name, dob, sex, physician, raw_data, sync_status, listener_port, listener_name)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'local', ?, ?)
-                ''', (patient_id, sample_id, name, dob, sex, physician, raw_data, listener_port, listener_name))
+                    (patient_id, sample_id, name, dob, sex, physician, raw_data, sync_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'local')
+                ''', (patient_id, sample_id, name, dob, sex, physician, raw_data))
                 conn.commit()
                 return cursor.lastrowid
         except sqlite3.Error as e:

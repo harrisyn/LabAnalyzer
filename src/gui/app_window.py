@@ -102,22 +102,23 @@ class ApplicationWindow:
     def _check_server_status(self):
         """Check if the server is already running and update UI accordingly"""
         if self.tcp_server and self.tcp_server.is_running:
-            # Server is already running - update dashboard
+            # Server is already running - update UI elements
+            port = self.config.get('port', 5000)
+            self.server_status.config(text=f"Server: Running on port {port}")
+            self.port_status.config(text=f"Port: {port} (Active)")
+            self.start_button.config(state=tk.DISABLED)
+            
+            # Log that UI was updated for existing server
             self.logger.info("UI updated for already running server")
+            
+            # Start periodic updates for an already running server
             self._schedule_updates()
-            self.update_ui_status()
         else:
-            # Server not running - update dashboard to show stopped state
-            self.update_ui_status()
+            # Server not running
+            self.start_button.config(state=tk.NORMAL)
 
     def _init_gui_components(self):
         """Initialize all GUI components"""
-        # Configure styles
-        style = ttk.Style()
-        style.configure("Card.TFrame", background="#f5f5f5", relief="raised", borderwidth=1)
-        style.configure("Modern.TButton", padding=5)
-        style.configure("Modern.Treeview", rowheight=25)
-        
         # Create menu
         self._create_menu()
         
@@ -132,10 +133,6 @@ class ApplicationWindow:
         self.scatter_plot = None
         self.scatter_canvas = None
         self.scatter_image = None
-
-    def update_ui_status(self):
-        """Update UI status (alias for dashboard update)"""
-        self._update_dashboard_status()
         
     def _create_menu(self):
         """Create the application menu bar"""
@@ -177,40 +174,12 @@ class ApplicationWindow:
             # Update window title
             self.root.title(self.config.get("app_name", "LabSync"))
             
-            # Auto-reload server configuration in a background thread to prevent UI freeze
-            def reload_server_thread():
-                try:
-                    was_running = self.tcp_server.is_running
-                    if was_running:
-                        self.log("Restarting server to apply new configuration...")
-                        # reload_config will handle stopping
-                    
-                    # Reload configuration (this blocks while stopping)
-                    self.tcp_server.reload_config()
-                    
-                    # Rebuild listener cards on main thread since config changed
-                    self.root.after(0, self._refresh_listener_dashboard)
-                    
-                    # Refresh dashboard status to show new listeners (via main thread)
-                    self.root.after(100, self.update_ui_status)
-                    
-                    # Restart if it was running
-                    if was_running:
-                        self.tcp_server.start()
-                        self.log("Server host-restarted with new configuration")
-                        # Trigger another UI update
-                        self.root.after(600, self.update_ui_status)
-                    else:
-                        self.root.after(0, lambda: messagebox.showinfo(
-                            "Configuration Saved", 
-                            "Settings saved. Start the server to use new configuration."
-                        ))
-                except Exception as e:
-                    self.logger.error(f"Error reloading server: {e}")
-                    self.log(f"Error reloading server: {e}")
-
-            # Start reload in background thread
-            threading.Thread(target=reload_server_thread, daemon=True).start()
+            # If server is running, show restart message
+            if self.start_button['state'] == tk.DISABLED:
+                messagebox.showinfo(
+                    "Restart Required",
+                    "Please restart the server for the new settings to take effect."
+                )
 
     def _check_for_updates_manual(self):
         """Manually trigger update check"""
@@ -285,160 +254,33 @@ Features:
         messagebox.showinfo("About", about_text)
 
     def _create_status_frame(self):
-        """Create the status section with listener dashboard"""
-        status_frame = ttk.LabelFrame(self.main_container, text="System Dashboard")
+        """Create the status section"""
+        status_frame = ttk.LabelFrame(self.main_container, text="System Status")
         status_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Dashboard container
-        dashboard = ttk.Frame(status_frame)
-        dashboard.pack(fill=tk.X, padx=5, pady=5)
+        # Server status
+        self.server_status = ttk.Label(status_frame, text="Server: Stopped")
+        self.server_status.pack(side=tk.LEFT, padx=5)
         
-        # Left side: Global controls and status
-        controls_frame = ttk.Frame(dashboard)
-        controls_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        # Connection status
+        self.connection_status = ttk.Label(status_frame, text="Connections: 0")
+        self.connection_status.pack(side=tk.LEFT, padx=5)
         
-        # Server status indicator
-        self.server_status = ttk.Label(controls_frame, text="Server Stopped", foreground="red")
-        self.server_status.pack(anchor=tk.W, pady=2)
+        # Sync status
+        self.sync_status = ttk.Label(status_frame, text="Sync: Disabled")
+        self.sync_status.pack(side=tk.LEFT, padx=5)
         
-        # Global stats
-        stats_frame = ttk.Frame(controls_frame)
-        stats_frame.pack(anchor=tk.W, pady=5)
-        self.connection_status = ttk.Label(stats_frame, text="Total Clients: 0")
-        self.connection_status.pack(anchor=tk.W)
-        self.sync_status = ttk.Label(stats_frame, text="Sync: Disabled")
-        self.sync_status.pack(anchor=tk.W)
+        # Port display
+        self.port_status = ttk.Label(status_frame, text=f"Port: {self.config.get('port', 5000)}")
+        self.port_status.pack(side=tk.LEFT, padx=5)
         
-        # Main Start/Stop button
-        self.start_button = ttk.Button(controls_frame, text="Start Server", command=self.start_server, width=15)
-        self.start_button.pack(pady=10)
+        # Control buttons
+        self.start_button = ttk.Button(status_frame, text="Start Server", command=self.start_server)
+        self.start_button.pack(side=tk.RIGHT, padx=5)
         
-        # Right side: Scrollable Listener Cards
-        listeners_container = ttk.Frame(dashboard)
-        listeners_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10)
-        
-        # Canvas for scrolling
-        self.dashboard_canvas = tk.Canvas(listeners_container, height=120)
-        scrollbar = ttk.Scrollbar(listeners_container, orient="horizontal", command=self.dashboard_canvas.xview)
-        
-        self.listeners_frame = ttk.Frame(self.dashboard_canvas)
-        self.listeners_frame.bind(
-            "<Configure>",
-            lambda e: self.dashboard_canvas.configure(scrollregion=self.dashboard_canvas.bbox("all"))
-        )
-        
-        self.dashboard_canvas.create_window((0, 0), window=self.listeners_frame, anchor="nw")
-        self.dashboard_canvas.configure(xscrollcommand=scrollbar.set)
-        
-        self.dashboard_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        # Store references to listener widgets for updates
-        self.listener_widgets = {}
-        
-        # Initial population of listener cards
-        self._refresh_listener_dashboard()
-
-    def _refresh_listener_dashboard(self):
-        """Refresh the listener cards based on configuration"""
-        # Clear existing
-        for widget in self.listeners_frame.winfo_children():
-            widget.destroy()
-        self.listener_widgets = {}
-        
-        listeners = self.config.get_listeners()
-        
-        for listener in listeners:
-            port = listener.get("port")
-            card = self._create_listener_card(listener)
-            card.pack(side=tk.LEFT, padx=5, pady=5)
-            self.listener_widgets[port] = card
-
-    def _create_listener_card(self, listener_config):
-        """Create a UI card for a single listener"""
-        port = listener_config.get("port")
-        name = listener_config.get("name", "Unknown")
-        analyzer = listener_config.get("analyzer_type", "Unknown")
-        protocol = listener_config.get("protocol", "Unknown")
-        
-        frame = ttk.Frame(self.listeners_frame, style="Card.TFrame", padding=10, relief="raised", borderwidth=1)
-        
-        # Header
-        header = ttk.Label(frame, text=name, font=("TkDefaultFont", 10, "bold"), cursor="hand2")
-        header.pack(anchor=tk.W)
-        
-        # Details
-        details_label = ttk.Label(frame, text=f"{analyzer} ({protocol})", cursor="hand2")
-        details_label.pack(anchor=tk.W)
-        port_label = ttk.Label(frame, text=f"Port: {port}", cursor="hand2")
-        port_label.pack(anchor=tk.W)
-        
-        # Status indicators - store references to update later
-        status_label = ttk.Label(frame, text="● Offline", foreground="gray", cursor="hand2")
-        status_label.pack(anchor=tk.W, pady=(5,0))
-        
-        clients_label = ttk.Label(frame, text="Clients: 0", cursor="hand2")
-        clients_label.pack(anchor=tk.W)
-        
-        # Store references in the frame widget itself
-        frame.status_label = status_label
-        frame.clients_label = clients_label
-        frame.listener_name = name  # Store name for filtering
-        
-        # Make entire card clickable to filter by this listener
-        def on_card_click(event):
-            self._filter_by_listener(name)
-        
-        # Bind click to frame and all children
-        frame.bind("<Button-1>", on_card_click)
-        for child in frame.winfo_children():
-            child.bind("<Button-1>", on_card_click)
-        
-        return frame
-
-    def _update_dashboard_status(self):
-        """Periodic update of dashboard status"""
-        if not self.tcp_server:
-            return
-
-        # Update global server status
-        if self.tcp_server.is_running:
-            self.server_status.config(text="Server Running", foreground="green")
-            self.start_button.config(state=tk.DISABLED, text="Running")
-        else:
-            self.server_status.config(text="Server Stopped", foreground="red")
-            self.start_button.config(state=tk.NORMAL, text="Start Server")
-
-        # Update global client count
-        total_clients = self.tcp_server.get_client_count()
-        self.connection_status.config(text=f"Total Clients: {total_clients}")
-
-        # Update individual listener cards
-        all_clients = self.tcp_server.get_clients()
-        
-        for port, widget in self.listener_widgets.items():
-            # Count clients for this port
-            port_clients = len([c for c in all_clients.values() 
-                              if c.get("local_port") == port and c.get("status") == "connected"])
-            
-            # Update widgets
-            if self.tcp_server.is_running:
-                widget.status_label.config(text="● Online", foreground="green")
-                widget.clients_label.config(text=f"Clients: {port_clients}")
-            else:
-                widget.status_label.config(text="● Offline", foreground="gray")
-                widget.clients_label.config(text="Clients: 0")
-    
-    # Placeholder for existing connection_count_label if it was used elsewhere
-    # We'll just ignore it or remove references if safe, 
-    # but to be safe let's ensure 'connection_count_label' exists but is hidden if we want to avoid breaking
-    # other methods that might reference it directly.
-    # Looking at code 'self.connection_count_label' was packed at bottom of status_frame.
-    # We replaced status_frame, so we should define it if needed.
-    # I'll add a property to handle backward compatibility just in case.
-    @property
-    def connection_count_label(self):
-        return self.connection_status
+        # Connection count label
+        self.connection_count_label = tk.Label(self.main_container, text="Connections: 0")
+        self.connection_count_label.pack()
 
     def _create_data_frame(self):
         """Create the data display section with patient view"""
@@ -493,14 +335,6 @@ Features:
         status_combo.pack(side=tk.LEFT, padx=5)
         status_combo.bind("<<ComboboxSelected>>", self._on_filter_changed)
         
-        # Listener filter
-        ttk.Label(status_frame, text="Listener:").pack(side=tk.LEFT, padx=(15, 5))
-        self.listener_filter_var = tk.StringVar(value="All")
-        self.listener_filter_combo = ttk.Combobox(status_frame, textvariable=self.listener_filter_var,
-                                                   values=["All"], width=20)
-        self.listener_filter_combo.pack(side=tk.LEFT, padx=5)
-        self.listener_filter_combo.bind("<<ComboboxSelected>>", self._on_filter_changed)
-        
         # Search frame
         search_frame = ttk.Frame(self.filter_frame)
         search_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -515,17 +349,13 @@ Features:
         ttk.Button(self.filter_frame, text="Apply Filters", 
                   command=self._on_filter_changed).pack(side=tk.RIGHT, padx=5, pady=5)
         
-        # Clear listener filter button
-        ttk.Button(self.filter_frame, text="Clear Listener Filter", 
-                  command=self._clear_listener_filter).pack(side=tk.RIGHT, padx=5, pady=5)
-        
         # Hide filter frame initially
         self.filter_frame.pack_forget()
         
-        # Setup patient treeview with Listener column
+        # Setup patient treeview
         self.patient_tree = ttk.Treeview(self.patient_frame, 
                                        columns=("ID", "Name", self.COLUMN_SAMPLE_ID, "Sex", 
-                                              "Date", "Listener", self.COLUMN_SYNC_STATUS, "Actions"))
+                                              "Date", self.COLUMN_SYNC_STATUS, "Actions"))
         self.patient_tree.heading("#0", text="")
         self.patient_tree.heading("ID", text="Patient ID", command=lambda: self._treeview_sort_column(self.patient_tree, "ID"))
         self.patient_tree.heading("Name", text="Name", command=lambda: self._treeview_sort_column(self.patient_tree, "Name"))
@@ -533,21 +363,19 @@ Features:
                                 command=lambda: self._treeview_sort_column(self.patient_tree, self.COLUMN_SAMPLE_ID))
         self.patient_tree.heading("Sex", text="Sex", command=lambda: self._treeview_sort_column(self.patient_tree, "Sex"))
         self.patient_tree.heading("Date", text="Date", command=lambda: self._treeview_sort_column(self.patient_tree, "Date"))
-        self.patient_tree.heading("Listener", text="Listener", command=lambda: self._treeview_sort_column(self.patient_tree, "Listener"))
         self.patient_tree.heading(self.COLUMN_SYNC_STATUS, text=self.COLUMN_SYNC_STATUS, 
                                 command=lambda: self._treeview_sort_column(self.patient_tree, self.COLUMN_SYNC_STATUS))
         self.patient_tree.heading("Actions", text="Actions")
         
         # Configure patient column widths
         self.patient_tree.column("#0", width=0, stretch=tk.NO)
-        self.patient_tree.column("ID", width=80)
-        self.patient_tree.column("Name", width=150)
-        self.patient_tree.column(self.COLUMN_SAMPLE_ID, width=80)
-        self.patient_tree.column("Sex", width=40)
-        self.patient_tree.column("Date", width=120)
-        self.patient_tree.column("Listener", width=100)
-        self.patient_tree.column(self.COLUMN_SYNC_STATUS, width=80)
-        self.patient_tree.column("Actions", width=100)
+        self.patient_tree.column("ID", width=100)
+        self.patient_tree.column("Name", width=200)
+        self.patient_tree.column(self.COLUMN_SAMPLE_ID, width=100)
+        self.patient_tree.column("Sex", width=50)
+        self.patient_tree.column("Date", width=150)
+        self.patient_tree.column(self.COLUMN_SYNC_STATUS, width=100)
+        self.patient_tree.column("Actions", width=150)
         
         # Add scrollbar to patient treeview
         patient_scrollbar = ttk.Scrollbar(self.patient_frame, orient=tk.VERTICAL, command=self.patient_tree.yview)
@@ -572,21 +400,6 @@ Features:
             self.toggle_button.config(text="▲ Hide Filters")
             self.filter_visible.set(True)
 
-    def _clear_listener_filter(self):
-        """Clear the listener filter and show all records"""
-        if hasattr(self, 'listener_filter_var'):
-            self.listener_filter_var.set("All")
-        self._on_filter_changed()
-        
-    def _filter_by_listener(self, listener_name):
-        """Filter records by specific listener (called when clicking a listener card)"""
-        if hasattr(self, 'listener_filter_var'):
-            self.listener_filter_var.set(listener_name)
-            # Show filters panel if hidden
-            if not self.filter_visible.get():
-                self._toggle_filters()
-            self._on_filter_changed()
-
     def _on_view_results_click(self, event):
         """Handle click on 'View Results' button in patient tree"""
         # Get the item ID that was clicked
@@ -596,7 +409,7 @@ Features:
             
         # Get the column ID that was clicked
         column_id = self.patient_tree.identify_column(event.x)
-        if column_id != "#8":  # "#8" is the "Actions" column (1-indexed, after adding Listener column)
+        if column_id != "#7":  # "#7" is the "Actions" column (1-indexed)
             return
             
         # Get patient ID from the tree item
@@ -872,60 +685,33 @@ Features:
         except Exception as e:
             self.logger.error(f"Error updating results: {e}")
             
-    def update_connection_count(self):
-        """Callback for connection updates"""
-        self._update_dashboard_status()
-
     def _update_patients_display(self):
         """Update the patients treeview with latest data"""
         try:
             # Clear existing items
             for item in self.patient_tree.get_children():
                 self.patient_tree.delete(item)
-            
-            # Get filter values
-            listener_filter = getattr(self, 'listener_filter_var', None)
-            listener_filter_value = listener_filter.get() if listener_filter else "All"
                 
-            # Build query with optional listener filter
-            query = '''
-                SELECT id, patient_id, name, dob, sex, physician, sample_id, created_at, sync_status, listener_port, listener_name
-                FROM patients
-            '''
-            params = []
-            
-            # Add listener filter if needed
-            if listener_filter_value and listener_filter_value != "All":
-                query += " WHERE listener_name = ?"
-                params.append(listener_filter_value)
-            
-            query += " ORDER BY created_at DESC LIMIT 100"
-            
-            # Get latest patients
+            # Get latest patients (limited to most recent)
             conn = self.db_manager._ensure_connection()
             cursor = conn.cursor()
-            cursor.execute(query, params)
+            cursor.execute('''
+                SELECT id, patient_id, name, dob, sex, physician, sample_id, created_at, sync_status
+                FROM patients
+                ORDER BY created_at DESC
+                LIMIT 100
+            ''')
             patients = cursor.fetchall()
-            
-            # Collect unique listener names for filter dropdown
-            listener_names = set()
             
             # Add to patient treeview
             for patient in patients:
-                db_id, patient_id, name, _, sex, _, sample_id, created_at, sync_status, listener_port, listener_name = patient
-                
-                # Collect listener names
-                if listener_name:
-                    listener_names.add(listener_name)
+                _, patient_id, name, _, sex, _, sample_id, created_at, sync_status = patient
                 
                 # Format date
                 created_date = created_at[:16] if created_at else "-"  # Get only the date part
                 
-                # Format listener display
-                listener_display = listener_name if listener_name else (f"Port {listener_port}" if listener_port else "-")
-                
                 # Determine sync status and action buttons
-                sync_status = sync_status or "local"
+                sync_status = sync_status or "Not Synced"
                 actions = "View Results"
                 
                 # Add sync button if remote sync is configured and not yet synced
@@ -933,23 +719,15 @@ Features:
                     if sync_status != "synced":
                         actions += " | Sync"
                 
-                # Create item with appropriate tags (now includes Listener column)
+                # Create item with appropriate tags
                 item_id = self.patient_tree.insert("", tk.END,
-                           values=(patient_id, name, sample_id, sex, created_date, listener_display, sync_status, actions))
+                           values=(patient_id, name, sample_id, sex, created_date, sync_status, actions))
                 
                 # Apply tags for clickable actions
                 tags = ["view_results"]
                 if sync_status != "synced" and self.config.get("external_server", {}).get("enabled", False):
                     tags.append("sync")
                 self.patient_tree.item(item_id, tags=tuple(tags))
-            
-            # Update listener filter dropdown with available listeners
-            if hasattr(self, 'listener_filter_combo'):
-                # Also get all unique listener names from database
-                cursor.execute("SELECT DISTINCT listener_name FROM patients WHERE listener_name IS NOT NULL")
-                all_listeners = [row[0] for row in cursor.fetchall() if row[0]]
-                listener_values = ["All"] + sorted(all_listeners)
-                self.listener_filter_combo['values'] = listener_values
                 
         except Exception as e:
             self.logger.error(f"Error updating patients display: {e}")
@@ -963,12 +741,12 @@ Features:
             
         # Get the column ID that was clicked
         column_id = self.patient_tree.identify_column(event.x)
-        if column_id != "#8":  # "#8" is the "Actions" column (after adding Listener column)
+        if column_id != "#7":  # "#7" is the "Actions" column
             return
             
         # Check if click was on the Sync part
         item_values = self.patient_tree.item(item_id)["values"]
-        if len(item_values) < 8 or "Sync" not in str(item_values[7]):
+        if len(item_values) < 7 or "Sync" not in item_values[6]:
             return
             
         # Get patient ID and attempt sync
@@ -1263,12 +1041,17 @@ Features:
 
     def server_started(self):
         """Update UI when server starts"""
-        self._update_dashboard_status()
+        port = self.config.get('port', 5000)
+        self.server_status.config(text=f"Server: Running on port {port}")
+        self.port_status.config(text=f"Port: {port} (Active)")
+        self.start_button.config(state=tk.DISABLED)
         self.log("Server started successfully")
 
     def server_stopped(self):
         """Update UI when server stops"""
-        self._update_dashboard_status()
+        self.server_status.config(text="Server: Stopped")
+        self.connection_status.config(text="Connections: 0")
+        self.start_button.config(state=tk.NORMAL)
         self.log("Server stopped")
 
     def update_connection_count(self):
@@ -1486,7 +1269,10 @@ Features:
 
     def _server_started_ui_update(self):
         """Update UI after server has started successfully"""
-        self.update_ui_status()
+        port = self.config.get('port', 5000)
+        self.server_status.config(text=f"Server: Running on port {port}")
+        self.port_status.config(text=f"Port: {port} (Active)")
+        self.start_button.config(state=tk.DISABLED)
         self.log("Server auto-started successfully")
         
         # Start periodic updates
