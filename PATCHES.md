@@ -76,6 +76,8 @@
 
 ### File: `src/network/tcp_server.py`
 
+- Added mapping for SYSMEX XN-L with HL7 protocol to allow correct parser selection.
+
 #### Change: Update `_create_parser` method (around line 76-91)
 
 **Find:**

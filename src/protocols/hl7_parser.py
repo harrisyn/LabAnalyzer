@@ -158,7 +158,9 @@ class HL7Parser(BaseParser):
                 patient_info['sex'],
                 patient_info['physician'],
                 full_payload,
-                patient_info['sample_id']
+                patient_info['sample_id'],
+                listener_port=self.listener_port,
+                listener_name=self.listener_name
             )
             
             if db_patient_id:

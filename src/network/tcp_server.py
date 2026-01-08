@@ -33,7 +33,8 @@ class TCPServer:
         (AnalyzerDefinitions.ABBOTT_ARCHITECT, AnalyzerDefinitions.PROTOCOL_POCT1A): AbbottParser,
         (AnalyzerDefinitions.VITROS, AnalyzerDefinitions.PROTOCOL_ASTM): VitrosParser,
         (AnalyzerDefinitions.BECKMAN_AU, AnalyzerDefinitions.PROTOCOL_ASTM): BeckmanParser,
-        (AnalyzerDefinitions.SYSMEX_XN_L, AnalyzerDefinitions.PROTOCOL_ASTM): ASTMParser
+        (AnalyzerDefinitions.SYSMEX_XN_L, AnalyzerDefinitions.PROTOCOL_ASTM): ASTMParser,
+        (AnalyzerDefinitions.SYSMEX_XN_L, AnalyzerDefinitions.PROTOCOL_HL7): HL7Parser
     }
 
     def __init__(self, config, db_manager, logger=None, gui_callback=None, sync_manager=None):
@@ -74,7 +75,8 @@ class TCPServer:
             prot = listener.get("protocol")
             
             if port and a_type and prot:
-                self.parsers[port] = self._create_parser(a_type, prot)
+                listener_name = listener.get("name", f"{a_type} on {port}")
+                self.parsers[port] = self._create_parser(a_type, prot, port, listener_name)
                 self.log_message(f"Configured listener on port {port}: {a_type} ({prot})")
 
         # For backward compatibility/ease of access, keep a reference to the "default" or first parser
@@ -95,7 +97,7 @@ class TCPServer:
         self.server_thread = None
         self.clients = {}
 
-    def _create_parser(self, analyzer_type, protocol):
+    def _create_parser(self, analyzer_type, protocol, port=None, listener_name=None):
         """Create appropriate parser based on analyzer type and protocol"""
         # Use arguments passed to the function, NOT self.* properties which might vary per listener
         parser_class = self.PARSER_MAP.get((analyzer_type, protocol), ASTMParser)
@@ -117,6 +119,10 @@ class TCPServer:
             gui_callback=self.gui_callback,
             config=self.config
         )
+        
+        # Set listener info for tracking which listener received data
+        if hasattr(parser, 'set_listener_info'):
+            parser.set_listener_info(port, listener_name)
         
         # Explicitly configure for the specific analyzer type
         if hasattr(parser, 'configure_for_analyzer'):
@@ -183,7 +189,7 @@ class TCPServer:
             client_sock.settimeout(1.0)
             
             # Register new client
-            self._register_client(client_id, addr, client_sock)
+            self._register_client(client_id, addr, client_sock, local_port)
             
             if parser:
                 self.log_message(f"Handling client {client_id} on port {local_port} with {type(parser).__name__}")
@@ -402,11 +408,12 @@ class TCPServer:
         """Synchronously stop the server - for shutdown"""
         self.stop()
 
-    def _register_client(self, client_id, addr, sock):
+    def _register_client(self, client_id, addr, sock, local_port):
         """Register a new client connection"""
         self.clients[client_id] = {
             "address": addr[0],
             "port": addr[1],
+            "local_port": local_port,
             "socket": sock,
             "status": "connected",
             "connected_at": datetime.now().isoformat()
@@ -447,3 +454,59 @@ class TCPServer:
     def get_client_count(self):
         """Get the count of active clients"""
         return len([c for c in self.clients.values() if c.get("status") == "connected"])
+
+    def reload_config(self):
+        """Reload configuration from the config object"""
+        self.log_message("Reloading server configuration...")
+        
+        # Stop everything first if running (though caller should probably stop first)
+        was_running = self.is_running
+        if was_running:
+            self.stop()
+            
+        # Re-read listeners config
+        self.listeners_config = self.config.get("listeners", [])
+        
+        # Backward compatibility logic
+        if not self.listeners_config:
+            analyzer_type = self.config.get("analyzer_type", AnalyzerDefinitions.SYSMEX_XN_L)
+            protocol = self.config.get("protocol", AnalyzerDefinitions.get_protocol_for_analyzer(analyzer_type))
+            port = self.config.get("port", 5000)
+            
+            self.listeners_config.append({
+                "port": port,
+                "analyzer_type": analyzer_type,
+                "protocol": protocol,
+                "name": "Default"
+            })
+            
+        self.log_message(f"Reloaded configuration: {len(self.listeners_config)} listeners")
+        
+        # Re-initialize parsers
+        self.parsers = {}
+        for listener in self.listeners_config:
+            port = listener.get("port")
+            a_type = listener.get("analyzer_type")
+            prot = listener.get("protocol")
+            
+            if port and a_type and prot:
+                self.parsers[port] = self._create_parser(a_type, prot)
+        
+        # Update default parser reference
+        if self.parsers:
+            self.parser = list(self.parsers.values())[0] 
+        else:
+            self.parser = None
+            
+        # Re-set sync manager on new parsers
+        if self.sync_manager:
+            for parser in self.parsers.values():
+                parser.set_sync_manager(self.sync_manager)
+
+        # Re-set GUI callback on new parsers
+        if self.gui_callback:
+            self.set_gui_callback(self.gui_callback)
+            
+        self.log_message("Configuration reload complete")
+        
+        return True

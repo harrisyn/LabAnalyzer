@@ -174,6 +174,14 @@ class ConfigDialog(tk.Toplevel):
         listeners_frame = ttk.LabelFrame(main_frame, text="Configured Listeners", padding="5")
         listeners_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # Buttons for listeners (Pack FIRST to ensure visibility)
+        btn_frame = ttk.Frame(listeners_frame)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+        
+        ttk.Button(btn_frame, text="Add Listener", command=self._add_listener).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(btn_frame, text="Edit", command=self._edit_listener).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(btn_frame, text="Remove", command=self._remove_listener).pack(side=tk.RIGHT, padx=2)
+
         # Treeview for listeners
         columns = ("Port", "Analyzer", "Protocol", "Name")
         self.listeners_tree = ttk.Treeview(listeners_frame, columns=columns, show="headings", selectmode="browse")
@@ -192,16 +200,8 @@ class ConfigDialog(tk.Toplevel):
         scrollbar = ttk.Scrollbar(listeners_frame, orient=tk.VERTICAL, command=self.listeners_tree.yview)
         self.listeners_tree.configure(yscrollcommand=scrollbar.set)
         
-        self.listeners_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Buttons for listeners
-        btn_frame = ttk.Frame(listeners_frame)
-        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
-        
-        ttk.Button(btn_frame, text="Add Listener", command=self._add_listener).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Edit", command=self._edit_listener).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Remove", command=self._remove_listener).pack(side=tk.LEFT, padx=2)
+        self.listeners_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         self._refresh_listeners_list()
         

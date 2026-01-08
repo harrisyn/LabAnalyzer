@@ -20,6 +20,15 @@ class BaseParser:
         self.gui_queue = queue.Queue()
         self._gui_worker_scheduled = False
         
+        # Listener info - set by TCPServer when creating the parser
+        self.listener_port = None
+        self.listener_name = None
+        
+    def set_listener_info(self, port, name):
+        """Set the listener info for this parser instance"""
+        self.listener_port = port
+        self.listener_name = name
+        
     def set_gui_callback(self, callback):
         """Set the GUI callback object"""
         self.gui_callback = callback
