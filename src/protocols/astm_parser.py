@@ -10,6 +10,7 @@ import json
 from typing import Optional, Dict, Any, List, Tuple
 from .base_parser import BaseParser
 from .scattergram_decoder import ScattergramDecoder
+from ..utils.test_code_mapping import LIS2_A_TEST_CODES, UNIT_NORMALIZATION, REFERENCE_RANGES
 
 class ASTMParser(BaseParser):
     """
@@ -69,6 +70,35 @@ class ASTMParser(BaseParser):
         self.analyzer_type = self.config.get("analyzer_type", "GENERIC")
         self.configure_for_analyzer(self.analyzer_type)
         
+        self.current_variant = "UNKNOWN"
+
+    def identify_variant(self, frames: List[str]) -> str:
+        """Identify which ASTM variant is being used"""
+        for frame in frames:
+            if not frame: continue
+            
+            # Strip frame number prefix (e.g., "3R|..." -> "R|...")
+            clean_frame = re.sub(r'^\d+', '', frame)
+            
+            # Check Header Record
+            if clean_frame.startswith('H'):
+                if "LIS2-A" in clean_frame:
+                    return "VARIANT_1"  # Simple/LIS2-A
+                if "E1394-97" in clean_frame:
+                    return "VARIANT_2"  # Sysmex/Comprehensive
+            
+            # Check Test Codes in Result Record
+            if clean_frame.startswith('R'):
+                fields = clean_frame.split('|')
+                if len(fields) > 2:
+                    test_code_field = fields[2]
+                    if "^^^1.0000+" in test_code_field:
+                        return "VARIANT_1"
+                    if "^^^^" in test_code_field and re.search(r'\^\^\^\^[A-Za-z]+', test_code_field):
+                        return "VARIANT_2"
+
+        return "UNKNOWN"
+
     def configure_for_analyzer(self, analyzer_type):
         """Configure parser settings based on analyzer type"""
         self.log_info(f"Configuring ASTM parser for analyzer type: {analyzer_type}")
@@ -237,6 +267,10 @@ class ASTMParser(BaseParser):
         Returns:
             Dictionary containing patient information and test results
         """
+        # Identify variant
+        self.current_variant = self.identify_variant(self.current_message_frames)
+        self.log_info(f"Identified ASTM Variant: {self.current_variant}")
+
         # Initialize message info
         message_info = {
             'patient_id': None,
@@ -246,6 +280,7 @@ class ASTMParser(BaseParser):
             'physician': None,
             'sample_id': None,
             'results': [],
+            'variant': self.current_variant,
             'timestamp': datetime.now().isoformat()
         }
         
@@ -287,19 +322,72 @@ class ASTMParser(BaseParser):
         return message_info
     
     def _extract_patient_info(self, fields: List[str], message_info: Dict[str, Any]):
-        """Extract patient information from P record fields"""
+        """
+        Extract patient information from P record fields
+        
+        ASTM E1394-97 Patient Record (P) Format:
+        ========================================
+        
+        Two common variants exist:
+        
+        1. Minimal Format (VARIANT_1 / LIS2-A):
+           P|1
+           - Contains only sequence number
+           - Patient identification comes from O record sample ID
+           - Common in basic laboratory instruments
+           - Example: Roche Cobas, some Sysmex models
+        
+        2. Full Format (VARIANT_2 / Comprehensive):
+           P|seq||sample_id|patient_id|name||dob|sex|race|address|...
+           
+           Key Fields (0-indexed):
+           - Field 1: Sequence number (usually '1')
+           - Field 2: Practice assigned patient ID (optional)
+           - Field 3: Laboratory assigned patient ID  
+           - Field 4: Patient ID (often used as primary)
+           - Field 5: Patient name (format: ^LASTNAME^FIRSTNAME or LASTNAME^FIRSTNAME)
+           - Field 6: Mother's maiden name (optional)
+           - Field 7: Date of Birth (YYYYMMDD)
+           - Field 8: Sex (M/F/U/O)
+           - Field 12: Physician name
+           
+           Common Name Formats:
+           - Sysmex: ^LASTNAME^FIRSTNAME (3 parts with empty first)
+           - Generic: LASTNAME^FIRSTNAME (2 parts)
+           - Alternative: ^FIRSTNAME^LASTNAME^SUFFIX (3 parts)
+        
+        Real-world Examples:
+        -------------------
+        Minimal:
+          P|1
+          
+        Full (Sysmex XN-L):
+          P|1||2613|771816|^Amankwah^Isaac||19970425|M|||||^||||||||||||
+          
+        Full (Generic ASTM):
+          P|1|||475371|^ADUKO^HARRIET||20050101|F|||||^||||||||||||
+        """
         try:
-            # Get field positions from configuration
+            # Adjust positions based on variant
             patient_id_pos = self.field_positions["patient_id"]
+            
+            # Variant 1 (LIS2-A) typically has minimal patient info
+            # P|1
+            # Variant 2 (Sysmex) has full info
+            
+            # Extract patient ID
+            if len(fields) > patient_id_pos and fields[patient_id_pos]:
+                message_info['patient_id'] = fields[patient_id_pos].strip()
+            
+            # ... continue with existing logic for other fields ...
+            # Code below is unchanged from original method except for variant awareness if needed
+            # For now reuse existing flexible logic but allow variant to override if specific differences pop up.
+            
             sample_id_pos = self.field_positions["sample_id"]
             name_pos = self.field_positions["patient_name"]
             dob_pos = self.field_positions["date_of_birth"]
             sex_pos = self.field_positions["sex"]
             physician_pos = self.field_positions["physician"]
-            
-            # Extract patient ID
-            if len(fields) > patient_id_pos and fields[patient_id_pos]:
-                message_info['patient_id'] = fields[patient_id_pos].strip()
             
             # Extract sample ID
             if len(fields) > sample_id_pos and fields[sample_id_pos]:
@@ -315,7 +403,7 @@ class ASTMParser(BaseParser):
                 # Log name parts for debugging
                 self.log_info(f"Name parts: {name_parts}")
                 
-                if self.analyzer_type in ["SYSMEX XN-L", "SYSMEX XN-550"]:
+                if self.analyzer_type in ["SYSMEX XN-L", "SYSMEX XN-550"] or self.current_variant == "VARIANT_2":
                     # SYSMEX format: ^LASTNAME^FIRSTNAME
                     if len(name_parts) >= 3:
                         patient_name = f"{name_parts[2]} {name_parts[1]}".strip()
@@ -375,6 +463,52 @@ class ASTMParser(BaseParser):
             import traceback
             self.log_error(f"Error extracting patient info: {e}\n{traceback.format_exc()}")
     
+    def _parse_flags(self, raw_flags: str) -> str:
+        """
+        Parse ASTM LIS2-A flags and convert to normalized format
+        
+        ASTM Flag Format: ^<flag1>^<detail1>\\^<flag2>^<detail2>\\...
+        where flag is typically:
+        - '0' = Normal (N)
+        - '1' = Low (L)
+        - '2' = High (H)
+        - '3' = Critical Low (C/CC)
+        - '4' = Critical High (C/CC)
+        - '5' = Abnormal/Flag (F)
+        - '6' = No Result (NR)
+        
+        Examples:
+        - '^0^' or '^0^\\^0^\\^0^' -> 'N'
+        - '^1^' -> 'L'
+        - '^2^' -> 'H'
+        - '^5^' -> 'F'
+        - '^6^' -> 'NR'
+        """
+        try:
+            if not raw_flags or raw_flags.strip() == '':
+                return 'N'  # Default to normal
+            
+            # Extract the first flag value
+            # Format: ^<digit>^... or ^<digit>^...
+            import re
+            match = re.search(r'\^([0-9])\^', raw_flags)
+            if match:
+                flag_code = match.group(1)
+                flag_map = {
+                    '0': 'N',      # Normal
+                    '1': 'L',      # Low
+                    '2': 'H',      # High
+                    '3': 'C',      # Critical Low
+                    '4': 'C',      # Critical High
+                    '5': 'F',      # Abnormal/Flag
+                    '6': 'NR'      # No Result
+                }
+                return flag_map.get(flag_code, raw_flags)
+            
+            return raw_flags  # Return as-is if can't parse
+        except Exception:
+            return raw_flags
+    
     def _extract_result_info(self, fields: List[str], message_info: Dict[str, Any]):
         """Extract test results from R record fields"""
         try:
@@ -394,24 +528,92 @@ class ASTMParser(BaseParser):
                 'sequence': fields[seq_pos] if len(fields) > seq_pos else "0"
             }
             
-            # Extract test code using the configured pattern
+            raw_numeric_code = None
+
+            # Extract test code
             if len(fields) > test_code_pos:
                 test_code_complex = fields[test_code_pos]
-                test_code_match = re.search(self.test_code_pattern, test_code_complex)
-                if test_code_match:
-                    result['test_code'] = test_code_match.group(1)
+                
+                # Check based on variant
+                if self.current_variant == "VARIANT_1":
+                    # Expecting ^^^1.0000+Code+...
+                    # Regex to extract the code: ^^^1.0000\+([0-9]+)\+
+                    match = re.search(r'\^\^\^1\.0000\+([A-Za-z0-9]+)', test_code_complex)
+                    if match:
+                         raw_code = match.group(1)
+                         raw_numeric_code = raw_code
+                         # Map to human readable if available
+                         if raw_code in LIS2_A_TEST_CODES:
+                             mapping = LIS2_A_TEST_CODES[raw_code]
+                             result['test_code'] = mapping['name']
+                             
+                             # Also normalize unit if not provided or override if strictly defined
+                             # (Optional: prefer analyzer unit if present, but normalize string)
+                         else:
+                             result['test_code'] = raw_code
+                    else:
+                         # Fallback for V1
+                         result['test_code'] = test_code_complex.strip().strip('^')
+                elif self.current_variant == "VARIANT_2":
+                    # Expecting ^^^^Code
+                    match = re.search(r'\^\^\^\^([A-Za-z0-9]+)', test_code_complex)
+                    if match:
+                        result['test_code'] = match.group(1)
+                    else:
+                        # Fallback for V2 
+                        test_code_match = re.search(self.test_code_pattern, test_code_complex)
+                        if test_code_match:
+                            result['test_code'] = test_code_match.group(1)
+                        else:
+                            result['test_code'] = test_code_complex.strip()
                 else:
-                    result['test_code'] = test_code_complex.strip()
+                    # Unknown or Generic - try to detect format dynamically
+                    # First try VARIANT_1 pattern (^^^1.0000+CODE+...)
+                    match = re.search(r'\^\^\^1\.0000\+([A-Za-z0-9]+)', test_code_complex)
+                    if match:
+                        raw_code = match.group(1)
+                        raw_numeric_code = raw_code
+                        # Map to human readable if available
+                        if raw_code in LIS2_A_TEST_CODES:
+                            mapping = LIS2_A_TEST_CODES[raw_code]
+                            result['test_code'] = mapping['name']
+                        else:
+                            result['test_code'] = raw_code
+                    else:
+                        # Try generic pattern
+                        test_code_match = re.search(self.test_code_pattern, test_code_complex)
+                        if test_code_match:
+                            result['test_code'] = test_code_match.group(1)
+                        else:
+                            result['test_code'] = test_code_complex.strip()
             
             # Extract value, unit and flags
             if len(fields) > value_pos:
                 result['value'] = fields[value_pos].strip()
             
             if len(fields) > unit_pos:
-                result['unit'] = fields[unit_pos].strip()
+                raw_unit = fields[unit_pos].strip()
+                # Apply unit normalization
+                result['unit'] = UNIT_NORMALIZATION.get(raw_unit, raw_unit)
             
             if len(fields) > flag_pos:
-                result['flags'] = fields[flag_pos].strip()
+                raw_flags = fields[flag_pos].strip()
+                # Parse the flags to get normalized format (N, H, L, C, F, NR)
+                result['flags'] = self._parse_flags(raw_flags)
+
+            # Calculate flags if missing and we have a reference range (specifically for Variant 1)
+            if not result['flags'] and raw_numeric_code and raw_numeric_code in REFERENCE_RANGES and result['value']:
+                try:
+                    val = float(result['value'])
+                    c_low, c_high = REFERENCE_RANGES[raw_numeric_code]
+                    if val < c_low:
+                        result['flags'] = 'L'
+                    elif val > c_high:
+                        result['flags'] = 'H'
+                    else:
+                        result['flags'] = 'N'
+                except (ValueError, TypeError):
+                    pass
             
             # Add to results array
             message_info['results'].append(result)
@@ -425,46 +627,57 @@ class ASTMParser(BaseParser):
         """
         Extract patient ID from O record fields when it's not found in the P record
         
-        Format examples:
-        - "^^                475371^M" (patient ID is 475371)
-        - Other ASTM O record formats with patient ID embedded
+        LIS2-A Format: O|1|<sample_id>||<test_list>|R||...
+        Field 2 (index 1) = Sample ID (e.g., "92 G^8^6", "48 B^2^4")
+        Field 4 (index 3) = Test list (e.g., "^^^1.0000+308+1.0\^^^1.0000+310+1.0\...")
         """
         try:
-            # First, try standard field that often contains patient ID in O records
-            # This is typically field 4 in O records (index 3)
+            # LIS2-A: Sample ID is in field 3 (index 2)
+            # Format: "O|1|546 Y^3^5||^^^1.0000+301+1.0\..."
+            # fields[0]=O, fields[1]=seq, fields[2]=sample_id, fields[3]=empty, fields[4]=test_list
+            if len(fields) > 2 and fields[2]:
+                sample_id = fields[2].strip()
+                # Skip if this is just a sequence number
+                if sample_id and not sample_id.isdigit():
+                    message_info['patient_id'] = sample_id
+                    message_info['sample_id'] = sample_id  # Also store as sample_id
+                    self.log_info(f"Extracted sample ID from O record field 3: {sample_id}")
+                    return
+            
+            # Fallback 1: Try field 3 for older ASTM formats
+            # Common format: "^^                PATIENT_ID^X"
             if len(fields) > 3 and fields[3]:
-                # Parse the complex field value to extract the patient ID
-                # Common format: ^^                PATIENT_ID^X
                 order_field = fields[3].strip()
                 
-                # Log the raw field for debugging
-                self.log_info(f"Attempting to extract patient ID from O record field: '{order_field}'")
-                
-                # Try to extract using regex - looking for numeric ID typically after spaces or ^ characters
-                patient_id_match = re.search(r'\^+\s*(\d+)', order_field)
-                if patient_id_match:
-                    patient_id = patient_id_match.group(1).strip()
-                    if patient_id:
-                        message_info['patient_id'] = patient_id
-                        self.log_info(f"Extracted patient ID from O record: {patient_id}")
-                        return
-                
-                # Try alternative approach - split by ^ and find a numeric component
-                parts = order_field.split('^')
-                for part in parts:
-                    part = part.strip()
-                    if part and part.isdigit():
-                        message_info['patient_id'] = part
-                        self.log_info(f"Extracted patient ID from O record (alternative method): {part}")
-                        return
+                # Skip if this looks like a test list (contains "1.0000+")
+                if "1.0000+" in order_field or "^^^" in order_field[:10]:
+                    self.log_info("Field 3 appears to be test list, skipping")
+                else:
+                    # Try to extract using regex - looking for numeric ID
+                    patient_id_match = re.search(r'\^+\s*(\d+)', order_field)
+                    if patient_id_match:
+                        patient_id = patient_id_match.group(1).strip()
+                        if patient_id:
+                            message_info['patient_id'] = patient_id
+                            self.log_info(f"Extracted patient ID from O record field 3: {patient_id}")
+                            return
+                    
+                    # Try alternative - split by ^ and find numeric component
+                    parts = order_field.split('^')
+                    for part in parts:
+                        part = part.strip()
+                        if part and part.isdigit():
+                            message_info['patient_id'] = part
+                            self.log_info(f"Extracted patient ID from O record field 3 (numeric part): {part}")
+                            return
             
-            # If the above methods don't work, try the same field position as in P records
-            patient_id_pos = self.field_positions["patient_id"]
+            # Fallback 2: Use same field position as in P records
+            patient_id_pos = self.field_positions.get("patient_id", 2)
             if len(fields) > patient_id_pos and fields[patient_id_pos]:
                 patient_id = fields[patient_id_pos].strip()
-                if patient_id:
+                if patient_id and "1.0000+" not in patient_id:  # Not a test list
                     message_info['patient_id'] = patient_id
-                    self.log_info(f"Extracted patient ID from O record standard position: {patient_id}")
+                    self.log_info(f"Extracted patient ID from O record position {patient_id_pos}: {patient_id}")
                     return
                     
         except Exception as e:
@@ -514,12 +727,14 @@ class ASTMParser(BaseParser):
                     # Use call_soon_threadsafe for thread safety
                     try:
                         loop = asyncio.get_event_loop()
+                        if loop.is_closed():
+                            self.log_info("Event loop is closed, skipping UI update")
+                            return
+                        loop.call_soon_threadsafe(
+                            lambda: self.gui_callback.update_patient_info(patient_info)
+                        )
                     except RuntimeError:
-                        loop = asyncio.new_event_loop()
-                        
-                    loop.call_soon_threadsafe(
-                        lambda: self.gui_callback.update_patient_info(patient_info)
-                    )
+                        self.log_info("No event loop available, skipping UI update")
             
             except Exception as e:
                 self.log_error(f"Error adding patient to database: {e}")
@@ -577,12 +792,14 @@ class ASTMParser(BaseParser):
                     # Use call_soon_threadsafe for thread safety
                     try:
                         loop = asyncio.get_event_loop()
+                        if loop.is_closed():
+                            self.log_info("Event loop is closed, skipping UI update")
+                            return
+                        loop.call_soon_threadsafe(
+                            lambda: self.gui_callback.update_results()
+                        )
                     except RuntimeError:
-                        loop = asyncio.new_event_loop()
-                        
-                    loop.call_soon_threadsafe(
-                        lambda: self.gui_callback.update_results()
-                    )
+                        self.log_info("No event loop available, skipping UI update")
                 except Exception as e:
                     self.log_error(f"Error updating UI with results: {e}")
             
@@ -634,12 +851,14 @@ class ASTMParser(BaseParser):
             if self.gui_callback and hasattr(self.gui_callback, 'update_scattergram'):
                 try:
                     loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        self.log_info("Event loop is closed, skipping scattergram update")
+                        return
+                    loop.call_soon_threadsafe(
+                        lambda: self.gui_callback.update_scattergram(scattergram)
+                    )
                 except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    
-                loop.call_soon_threadsafe(
-                    lambda: self.gui_callback.update_scattergram(scattergram)
-                )
+                    self.log_info("No event loop available, skipping scattergram update")
                 
                 # Show the scattergram frame if it exists
                 if hasattr(self.gui_callback, '_show_scattergram'):

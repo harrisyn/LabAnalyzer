@@ -5,6 +5,7 @@ import re
 import asyncio
 from datetime import datetime
 from .base_parser import BaseParser
+from ..utils.test_code_mapping import LIS2_A_TEST_CODES
 
 class HL7Parser(BaseParser):
     """
@@ -182,10 +183,16 @@ class HL7Parser(BaseParser):
                     try:
                         # Add database ID to the info
                         patient_info['db_id'] = db_patient_id
-                        asyncio.get_event_loop().call_soon_threadsafe(
-                            self.gui_callback.update_patient_info,
-                            patient_info
-                        )
+                        loop = asyncio.get_event_loop()
+                        if not loop.is_closed():
+                            loop.call_soon_threadsafe(
+                                self.gui_callback.update_patient_info,
+                                patient_info
+                            )
+                        else:
+                            self.log_info("Event loop is closed, skipping UI update")
+                    except RuntimeError:
+                        self.log_info("No event loop available, skipping UI update")
                     except Exception as e:
                         self.log_error(f"Error updating GUI with patient info: {e}")
                         
@@ -316,11 +323,27 @@ class HL7Parser(BaseParser):
             # Test code is typically in field 3, often in format CODE^NAME
             test_field = fields[3] if len(fields) > 3 else ""
             test_parts = test_field.split("^")
-            test_code = test_parts[0] if test_parts else ""
+            raw_test_code = test_parts[0] if test_parts else ""
+            
+            # Map numeric test code to human-readable name if available
+            if raw_test_code in LIS2_A_TEST_CODES:
+                mapping = LIS2_A_TEST_CODES[raw_test_code]
+                test_code = mapping['name']
+            else:
+                test_code = raw_test_code
             
             value = fields[5] if len(fields) > 5 else ""
             unit = fields[6] if len(fields) > 6 else ""
-            flags = fields[8] if len(fields) > 8 else ""
+            raw_flags = fields[8] if len(fields) > 8 else ""
+            
+            # Parse HL7 flags: N=Normal, H=High, L=Low, etc.
+            # HL7 uses single character flags, so just take the first character if present
+            flags = raw_flags.strip().upper() if raw_flags else "N"
+            # Ensure we only store single character or known values
+            if flags and flags[0] in ['N', 'H', 'L', 'C', 'F']:
+                flags = flags[0]
+            elif not flags:
+                flags = "N"
             
             # Try to convert value to float for storage
             try:

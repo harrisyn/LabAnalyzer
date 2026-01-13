@@ -170,6 +170,11 @@ class ConfigDialog(tk.Toplevel):
         auto_start_check = ttk.Checkbutton(app_frame, text="Auto-start server", variable=self.auto_start_var)
         auto_start_check.grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
 
+        # Debug mode option
+        self.debug_mode_var = tk.BooleanVar(value=self.config.get("debug_raw_data", False))
+        debug_mode_check = ttk.Checkbutton(app_frame, text="Debug Mode (Log Raw Data)", variable=self.debug_mode_var)
+        debug_mode_check.grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
+
         # Listeners Settings
         listeners_frame = ttk.LabelFrame(main_frame, text="Configured Listeners", padding="5")
         listeners_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -621,6 +626,7 @@ class ConfigDialog(tk.Toplevel):
                 listeners=self.local_listeners,
                 app_name=self.app_name_var.get(),
                 auto_start=self.auto_start_var.get(),
+                debug_raw_data=self.debug_mode_var.get(),
                 external_server=external_server_config
             )
             

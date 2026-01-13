@@ -58,6 +58,7 @@ class Config:
             "protocol": "ASTM",
             
             "auto_start": False,
+            "debug_raw_data": False,
             "external_server": {
                 "enabled": True,
                 "url": "https://api.staging.serenity.health/v2/emr/lab-analyzer-results",
@@ -136,7 +137,7 @@ class Config:
         """Get the list of configured listeners"""
         return self.config.get("listeners", [])
 
-    def add_listener(self, port, analyzer_type, protocol):
+    def add_listener(self, port, analyzer_type, protocol, name=None, enabled=True):
         """Add a new listener configuration"""
         listeners = self.get_listeners()
         # Check if port already exists
@@ -145,6 +146,9 @@ class Config:
                 # Update existing
                 listener["analyzer_type"] = analyzer_type
                 listener["protocol"] = protocol
+                if name:
+                    listener["name"] = name
+                listener["enabled"] = enabled
                 self._save_config()
                 return
         
@@ -152,10 +156,22 @@ class Config:
         listeners.append({
             "port": port,
             "analyzer_type": analyzer_type,
-            "protocol": protocol
+            "protocol": protocol,
+            "name": name or f"{analyzer_type} ({protocol})",
+            "enabled": enabled
         })
         self.config["listeners"] = listeners
         self._save_config()
+
+    def update_listener_state(self, port, enabled):
+        """Update the enabled state of a listener"""
+        listeners = self.get_listeners()
+        for listener in listeners:
+            if listener["port"] == port:
+                listener["enabled"] = enabled
+                self._save_config()
+                return True
+        return False
 
     def remove_listener(self, port):
         """Remove a listener by port"""

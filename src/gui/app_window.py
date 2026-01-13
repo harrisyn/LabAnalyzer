@@ -301,6 +301,9 @@ Features:
         self.server_status = ttk.Label(controls_frame, text="Server Stopped", foreground="red")
         self.server_status.pack(anchor=tk.W, pady=2)
         
+        # Debug warning label (initially hidden)
+        self.debug_warning = ttk.Label(controls_frame, text="⚠ DEBUG ENABLED", foreground="orange", font=("TkDefaultFont", 9, "bold"))
+        
         # Global stats
         stats_frame = ttk.Frame(controls_frame)
         stats_frame.pack(anchor=tk.W, pady=5)
@@ -318,7 +321,7 @@ Features:
         listeners_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10)
         
         # Canvas for scrolling
-        self.dashboard_canvas = tk.Canvas(listeners_container, height=120)
+        self.dashboard_canvas = tk.Canvas(listeners_container, height=160)
         scrollbar = ttk.Scrollbar(listeners_container, orient="horizontal", command=self.dashboard_canvas.xview)
         
         self.listeners_frame = ttk.Frame(self.dashboard_canvas)
@@ -352,7 +355,41 @@ Features:
             port = listener.get("port")
             card = self._create_listener_card(listener)
             card.pack(side=tk.LEFT, padx=5, pady=5)
+            # Use port as key only if enabled, though we might want to track disabled ones too
+            # Logic in _update_dashboard_status iterates self.listener_widgets items.
             self.listener_widgets[port] = card
+
+    def _toggle_listener(self, port, current_state):
+        """Toggle the enabled state of a listener"""
+        new_state = not current_state
+        
+        # Update config
+        if hasattr(self.config, 'update_listener_state'):
+             self.config.update_listener_state(port, new_state)
+        else:
+             # Fallback if config method missing
+             self.logger.warning("Config update_listener_state method missing")
+             return
+
+        # Reload server configuration
+        def reload_server_thread():
+            try:
+                was_running = self.tcp_server.is_running
+                
+                # Update UI immediately to show responsiveness
+                self.root.after(0, self._refresh_listener_dashboard)
+                
+                if was_running:
+                     # This effectively restarts the server with new config
+                     self.tcp_server.reload_config()
+                     self.tcp_server.start()
+                     self.log(f"Server updated: Listener on port {port} {'resumed' if new_state else 'paused'}")
+                     self.root.after(500, self.update_ui_status)
+
+            except Exception as e:
+                self.logger.error(f"Error toggling listener: {e}")
+                
+        threading.Thread(target=reload_server_thread, daemon=True).start()
 
     def _create_listener_card(self, listener_config):
         """Create a UI card for a single listener"""
@@ -360,39 +397,69 @@ Features:
         name = listener_config.get("name", "Unknown")
         analyzer = listener_config.get("analyzer_type", "Unknown")
         protocol = listener_config.get("protocol", "Unknown")
+        enabled = listener_config.get("enabled", True)
         
         frame = ttk.Frame(self.listeners_frame, style="Card.TFrame", padding=10, relief="raised", borderwidth=1)
         
-        # Header
-        header = ttk.Label(frame, text=name, font=("TkDefaultFont", 10, "bold"), cursor="hand2")
-        header.pack(anchor=tk.W)
+        # Header frame for title and toggle
+        header_frame = ttk.Frame(frame)
+        header_frame.pack(fill=tk.X, pady=(0, 5))
         
-        # Details
-        details_label = ttk.Label(frame, text=f"{analyzer} ({protocol})", cursor="hand2")
+        # Header
+        header = ttk.Label(header_frame, text=name, font=("TkDefaultFont", 10, "bold"), cursor="hand2")
+        header.pack(side=tk.LEFT, anchor=tk.W)
+        
+        # Toggle Button (Small)
+        btn_text = "⏸" if enabled else "▶"
+        btn_style = "Modern.TButton" 
+        state_color = "black" if enabled else "gray"
+        
+        toggle_btn = ttk.Button(header_frame, text=btn_text, width=3,
+                               command=lambda p=port, s=enabled: self._toggle_listener(p, s))
+        toggle_btn.pack(side=tk.RIGHT)
+        
+        # Config info
+        # If disabled, show visual cue
+        fg_color = "black" if enabled else "gray"
+        
+        details_label = ttk.Label(frame, text=f"{analyzer} ({protocol})", foreground=fg_color, cursor="hand2")
         details_label.pack(anchor=tk.W)
-        port_label = ttk.Label(frame, text=f"Port: {port}", cursor="hand2")
+        port_label = ttk.Label(frame, text=f"Port: {port}", foreground=fg_color, cursor="hand2")
         port_label.pack(anchor=tk.W)
         
         # Status indicators - store references to update later
-        status_label = ttk.Label(frame, text="● Offline", foreground="gray", cursor="hand2")
+        status_text = "● Offline"
+        status_fg = "gray"
+        
+        if not enabled:
+            status_text = "● Paused"
+            status_fg = "orange"
+            
+        status_label = ttk.Label(frame, text=status_text, foreground=status_fg, cursor="hand2")
         status_label.pack(anchor=tk.W, pady=(5,0))
         
-        clients_label = ttk.Label(frame, text="Clients: 0", cursor="hand2")
+        clients_label = ttk.Label(frame, text="Clients: 0", foreground=fg_color, cursor="hand2")
         clients_label.pack(anchor=tk.W)
         
         # Store references in the frame widget itself
         frame.status_label = status_label
         frame.clients_label = clients_label
         frame.listener_name = name  # Store name for filtering
+        frame.is_enabled = enabled # Store enabled state
         
-        # Make entire card clickable to filter by this listener
+        # Make entire card clickable to filter by this listener (except button)
         def on_card_click(event):
+            # Don't trigger if button was clicked (event propagation might still happen though)
             self._filter_by_listener(name)
         
-        # Bind click to frame and all children
+        # Bind click to frame and all children except button
         frame.bind("<Button-1>", on_card_click)
         for child in frame.winfo_children():
-            child.bind("<Button-1>", on_card_click)
+            if child != header_frame: # Skip header frame container to drill down
+                child.bind("<Button-1>", on_card_click)
+        
+        # Bind header frame children except button
+        header.bind("<Button-1>", on_card_click)
         
         return frame
 
@@ -409,6 +476,12 @@ Features:
             self.server_status.config(text="Server Stopped", foreground="red")
             self.start_button.config(state=tk.NORMAL, text="Start Server")
 
+        # Show/Hide debug warning
+        if self.config.get("debug_raw_data", False):
+            self.debug_warning.pack(anchor=tk.W, pady=2, before=self.start_button)
+        else:
+            self.debug_warning.pack_forget()
+
         # Update global client count
         total_clients = self.tcp_server.get_client_count()
         self.connection_status.config(text=f"Total Clients: {total_clients}")
@@ -417,6 +490,14 @@ Features:
         all_clients = self.tcp_server.get_clients()
         
         for port, widget in self.listener_widgets.items():
+            # Check if this widget represents a disabled listener
+            is_enabled = getattr(widget, 'is_enabled', True)
+            
+            if not is_enabled:
+                widget.status_label.config(text="● Paused", foreground="orange")
+                widget.clients_label.config(text="Clients: -")
+                continue
+
             # Count clients for this port
             port_clients = len([c for c in all_clients.values() 
                               if c.get("local_port") == port and c.get("status") == "connected"])
@@ -625,13 +706,10 @@ Features:
         patient_info = self._get_patient_info(patient_id)
         sync_status = "Not Synced"
         if patient_info:
-            # Get the actual sync status from database
-            conn = self.db_manager._ensure_connection()
-            cursor = conn.cursor()
-            cursor.execute('SELECT sync_status FROM patients WHERE id = ?', (patient_info['db_id'],))
-            result = cursor.fetchone()
-            if result and result[0]:
-                sync_status = result[0]
+            # Get the actual sync status from database using thread-safe method
+            db_sync_status = self.db_manager.get_patient_sync_status(patient_info['db_id'])
+            if db_sync_status:
+                sync_status = db_sync_status
         
             # Create header with patient info
             header_frame = ttk.Frame(results_frame, style=self.STYLE_CARD_FRAME)
@@ -809,21 +887,16 @@ Features:
     def _get_patient_info(self, patient_id):
         """Get patient information from the database"""
         try:
-            # Query database for patient info
-            conn = self.db_manager._ensure_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT id, patient_id, name, dob, sex, physician, sample_id
-                FROM patients
-                WHERE patient_id = ?
-            ''', (patient_id,))
-            result = cursor.fetchone()
+            # Use thread-safe db_manager method
+            patient = self.db_manager.get_patient_by_id(
+                self.db_manager.get_patient_id_by_patient_id(patient_id)
+            )
             
-            if result:
-                db_id, patient_id, name, dob, sex, physician, sample_id = result
+            if patient:
+                db_id, pid, sample_id, name, dob, sex, physician, raw_data, sync_status, created_at = patient
                 return {
                     "db_id": db_id,
-                    "patient_id": patient_id,
+                    "patient_id": pid,
                     "name": name,
                     "dob": dob,
                     "sex": sex,
@@ -886,26 +959,10 @@ Features:
             # Get filter values
             listener_filter = getattr(self, 'listener_filter_var', None)
             listener_filter_value = listener_filter.get() if listener_filter else "All"
-                
-            # Build query with optional listener filter
-            query = '''
-                SELECT id, patient_id, name, dob, sex, physician, sample_id, created_at, sync_status, listener_port, listener_name
-                FROM patients
-            '''
-            params = []
             
-            # Add listener filter if needed
-            if listener_filter_value and listener_filter_value != "All":
-                query += " WHERE listener_name = ?"
-                params.append(listener_filter_value)
-            
-            query += " ORDER BY created_at DESC LIMIT 100"
-            
-            # Get latest patients
-            conn = self.db_manager._ensure_connection()
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            patients = cursor.fetchall()
+            # Use thread-safe db_manager method
+            filter_value = listener_filter_value if listener_filter_value != "All" else None
+            patients = self.db_manager.get_recent_patients_filtered(filter_value, limit=100)
             
             # Collect unique listener names for filter dropdown
             listener_names = set()
@@ -945,9 +1002,8 @@ Features:
             
             # Update listener filter dropdown with available listeners
             if hasattr(self, 'listener_filter_combo'):
-                # Also get all unique listener names from database
-                cursor.execute("SELECT DISTINCT listener_name FROM patients WHERE listener_name IS NOT NULL")
-                all_listeners = [row[0] for row in cursor.fetchall() if row[0]]
+                # Use thread-safe db_manager method
+                all_listeners = self.db_manager.get_unique_listener_names()
                 listener_values = ["All"] + sorted(all_listeners)
                 self.listener_filter_combo['values'] = listener_values
                 
@@ -1064,15 +1120,16 @@ Features:
                 # Mark patient as synced
                 self.db_manager.mark_patient_synced(patient_db_id)
                 
-                # Mark all results for this patient as synced
-                conn = self.db_manager._ensure_connection()
-                cursor = conn.cursor()
-                cursor.execute('''
-                    UPDATE results 
-                    SET sync_status = 'synced'
-                    WHERE patient_id = ?
-                ''', (patient_db_id,))
-                conn.commit()
+                # Mark all results for this patient as synced using thread-safe method
+                with self.db_manager.lock:
+                    conn = self.db_manager._ensure_connection()
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE results 
+                        SET sync_status = 'synced'
+                        WHERE patient_id = ?
+                    ''', (patient_db_id,))
+                    conn.commit()
                 
                 # Update the display
                 self._update_patients_display()
@@ -1574,11 +1631,12 @@ Features:
                 query += " WHERE " + " AND ".join(where_clauses)
             query += " ORDER BY created_at DESC LIMIT 100"
             
-            # Execute query
-            conn = self.db_manager._ensure_connection()
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            patients = cursor.fetchall()
+            # Execute query with thread-safe lock
+            with self.db_manager.lock:
+                conn = self.db_manager._ensure_connection()
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                patients = cursor.fetchall()
             
             # Add filtered results to treeview
             for patient in patients:

@@ -45,6 +45,11 @@ class TCPServer:
         self.gui_callback = gui_callback
         self.gui_queue = queue.Queue()
         self._gui_worker_scheduled = False
+        self._gui_worker_lock = threading.Lock()  # Thread-safe GUI scheduling
+        
+        # ASTM frame buffers per client for handling partial frames
+        self._client_buffers = {}  # client_id -> bytearray
+        self._buffer_lock = threading.Lock()
         
         # Determine listeners configuration
         self.listeners_config = self.config.get("listeners", [])
@@ -149,10 +154,15 @@ class TCPServer:
             self._schedule_gui_worker()
 
     def _schedule_gui_worker(self):
-        """Schedule the GUI worker if not already scheduled"""
-        if not self._gui_worker_scheduled and self.gui_callback and hasattr(self.gui_callback, 'root'):
-            self.gui_callback.root.after(100, self._process_gui_queue)
-            self._gui_worker_scheduled = True
+        """Schedule the GUI worker if not already scheduled - thread-safe"""
+        with self._gui_worker_lock:
+            if not self._gui_worker_scheduled and self.gui_callback and hasattr(self.gui_callback, 'root'):
+                try:
+                    self.gui_callback.root.after(100, self._process_gui_queue)
+                    self._gui_worker_scheduled = True
+                except Exception:
+                    # GUI might not be ready yet
+                    pass
 
     def _process_gui_queue(self):
         """Process pending GUI updates"""
@@ -172,8 +182,14 @@ class TCPServer:
         except Exception as e:
             self.logger.error(f"Error processing GUI queue: {e}")
         finally:
-            if self.is_running and self.gui_callback and hasattr(self.gui_callback, 'root'):
-                self.gui_callback.root.after(100, self._process_gui_queue)
+            with self._gui_worker_lock:
+                if self.is_running and self.gui_callback and hasattr(self.gui_callback, 'root'):
+                    try:
+                        self.gui_callback.root.after(100, self._process_gui_queue)
+                    except Exception:
+                        self._gui_worker_scheduled = False
+                else:
+                    self._gui_worker_scheduled = False
 
     def handle_client(self, client_sock, addr, local_port):
         """Handle client connection in a separate thread"""
@@ -191,6 +207,10 @@ class TCPServer:
             # Register new client
             self._register_client(client_id, addr, client_sock, local_port)
             
+            # Initialize buffer for this client
+            with self._buffer_lock:
+                self._client_buffers[client_id] = bytearray()
+            
             if parser:
                 self.log_message(f"Handling client {client_id} on port {local_port} with {type(parser).__name__}")
             else:
@@ -199,8 +219,8 @@ class TCPServer:
             # Main client loop
             while self.is_running:
                 try:
-                    # Receive data with timeout
-                    data = client_sock.recv(4096)
+                    # Receive data with timeout - use larger buffer for ASTM frames
+                    data = client_sock.recv(8192)
                     
                     # Check if connection closed
                     if not data:
@@ -211,14 +231,18 @@ class TCPServer:
                     
                     # Log raw data for debugging (if enabled)
                     if self.config.get("debug_raw_data", False):
+                        self._log_raw_data_to_file(data, local_port)
                         try:
                             self.log_message(f"Raw data: {data!r}")
                         except Exception:
                             self.log_message(f"Raw data: [Binary data of {len(data)} bytes]")
                     
-                    # Let the parser handle the data and get the response
-                    if parser:
-                        response = parser.handle_data(data)
+                    # Buffer the data and extract complete frames
+                    complete_data = self._buffer_data(client_id, data)
+                    
+                    # Let the parser handle the buffered data and get the response
+                    if parser and complete_data:
+                        response = parser.handle_data(complete_data)
                         
                         # Send the response if one was returned
                         if response:
@@ -251,6 +275,11 @@ class TCPServer:
             try:
                 client_sock.close()
                 
+                # Clean up buffer for this client
+                with self._buffer_lock:
+                    if client_id in self._client_buffers:
+                        del self._client_buffers[client_id]
+                
                 # Update client status
                 if client_id in self.clients:
                     self.clients[client_id]["status"] = "disconnected"
@@ -262,6 +291,114 @@ class TCPServer:
                 self.queue_gui_update('log_disconnection', addr[0], addr[1])
             except Exception as e:
                 self.log_message(f"Error during client cleanup: {e}", level="error")
+
+    def _buffer_data(self, client_id, data):
+        """
+        Buffer incoming data and return complete ASTM frames.
+        
+        ASTM frames are delimited by:
+        - STX (0x02) at start
+        - ETX (0x03) or ETB (0x17) at end
+        - Followed by checksum and CR LF
+        
+        This handles partial frames that may be split across recv() calls.
+        
+        Args:
+            client_id: Client identifier
+            data: Raw bytes received
+            
+        Returns:
+            Complete buffered data or None if still waiting for more data
+        """
+        # ASTM control characters
+        STX = 0x02  # Start of Text
+        ETX = 0x03  # End of Text
+        ETB = 0x17  # End of Block
+        EOT = 0x04  # End of Transmission
+        ENQ = 0x05  # Enquiry
+        ACK = 0x06  # Acknowledge
+        NAK = 0x15  # Negative Acknowledge
+        CR = 0x0D   # Carriage Return
+        LF = 0x0A   # Line Feed
+        
+        with self._buffer_lock:
+            # Get or create buffer for this client
+            if client_id not in self._client_buffers:
+                self._client_buffers[client_id] = bytearray()
+            
+            buffer = self._client_buffers[client_id]
+            buffer.extend(data)
+            
+            # Single control characters (ENQ, ACK, NAK, EOT) should be processed immediately
+            if len(buffer) == 1:
+                if buffer[0] in (ENQ, ACK, NAK, EOT):
+                    result = bytes(buffer)
+                    buffer.clear()
+                    return result
+            
+            # Check for complete frames
+            # Look for frame endings: ETX + checksum + CR + LF or ETB + checksum + CR + LF
+            complete_data = bytearray()
+            
+            while buffer:
+                # Handle single control characters at start of buffer
+                if buffer[0] in (ENQ, ACK, NAK, EOT):
+                    complete_data.append(buffer[0])
+                    del buffer[0]
+                    continue
+                
+                # Look for STX
+                try:
+                    stx_pos = buffer.index(STX)
+                except ValueError:
+                    # No STX found - might be non-ASTM data or corrupt
+                    # Return what we have and clear buffer
+                    if buffer:
+                        result = bytes(buffer)
+                        buffer.clear()
+                        return result if complete_data else result
+                    break
+                
+                # Remove any data before STX (shouldn't happen in normal operation)
+                if stx_pos > 0:
+                    complete_data.extend(buffer[:stx_pos])
+                    del buffer[:stx_pos]
+                
+                # Look for ETX or ETB followed by checksum and CR LF
+                frame_end = -1
+                for i, byte in enumerate(buffer):
+                    if byte in (ETX, ETB):
+                        # Need at least 3 more bytes: checksum (2 chars) + CR + LF or just CR+LF
+                        # Minimum: ETX + 2 checksum chars + CR + LF = 5 bytes from ETX position
+                        # But some devices might not use checksum, look for CR LF
+                        min_end = i + 3  # ETX + CR + LF minimum
+                        if len(buffer) >= min_end:
+                            # Check if we have CR LF after ETX/ETB (possibly with checksum)
+                            for j in range(i + 1, min(len(buffer), i + 5)):
+                                if j + 1 < len(buffer):
+                                    if buffer[j] == CR and buffer[j + 1] == LF:
+                                        frame_end = j + 2
+                                        break
+                                    elif buffer[j] == CR or buffer[j] == LF:
+                                        # Some devices use just CR or LF
+                                        frame_end = j + 1
+                                        break
+                            if frame_end > 0:
+                                break
+                
+                if frame_end > 0:
+                    # Complete frame found
+                    complete_data.extend(buffer[:frame_end])
+                    del buffer[:frame_end]
+                else:
+                    # Incomplete frame - wait for more data
+                    break
+            
+            if complete_data:
+                return bytes(complete_data)
+            
+            # Still waiting for more data
+            return None
 
     def start(self):
         """Start the TCP server"""
@@ -289,7 +426,13 @@ class TCPServer:
             # Create sockets for each listener
             for listener in self.listeners_config:
                 port = int(listener.get("port", 5000))
+                name = listener.get('name', 'Unknown')
                 
+                # specific check for enabled flag
+                if "enabled" in listener and not listener["enabled"]:
+                    self.log_message(f"Listener on port {port} ({name}) is disabled/paused.")
+                    continue
+
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -301,13 +444,25 @@ class TCPServer:
                     sel.register(sock, selectors.EVENT_READ, data=port)
                     
                     self.server_sockets.append(sock)
-                    self.log_message(f"Listening on 0.0.0.0:{port} ({listener.get('name', 'Unknown')})")
+                    self.log_message(f"Listening on 0.0.0.0:{port} ({name})")
                     
                 except OSError as e:
                     self.log_message(f"Failed to bind to port {port}: {e}", level="error")
             
             if not self.server_sockets:
-                self.log_message("No sockets opened. Stopping server.", level="error")
+                # If we have listeners configured but all are disabled, this might be intentional.
+                # But if NO listeners are configured at all, or binding failed, we stop.
+                
+                # Check if we have any enabled listeners that failed
+                enabled_listeners = [l for l in self.listeners_config if l.get("enabled", True)]
+                
+                if not enabled_listeners:
+                     self.log_message("No enabled listeners configured. Server pausing.", level="warning")
+                     # We can keep running effectively doing nothing, or stop.
+                     # Original logic stopped. Let's keep it stopping but clarify message.
+                else:
+                    self.log_message("No sockets opened (all bindings failed). Stopping server.", level="error")
+                
                 self.is_running = False
                 self.queue_gui_update('server_stopped')
                 return False
@@ -364,6 +519,26 @@ class TCPServer:
                 sel.close()
             except:
                 pass
+
+    def _log_raw_data_to_file(self, data, port):
+        """Log raw data to a file for debugging"""
+        try:
+            import os
+            # Use LOCALAPPDATA for log storage
+            from pathlib import Path
+            default_dir = Path(os.getenv('LOCALAPPDATA')) / 'LabSync' / 'debug_logs'
+            default_dir.mkdir(parents=True, exist_ok=True)
+            
+            filename = default_dir / f"raw_data_port_{port}.log"
+            
+            with open(filename, 'ab') as f:
+                # Write timestamp header
+                timestamp = datetime.now().isoformat().encode('utf-8')
+                f.write(b'--- ' + timestamp + b' ---\n')
+                f.write(data)
+                f.write(b'\n')
+        except Exception as e:
+            self.log_message(f"Error writing raw debug data: {e}", level="error")
 
     def stop(self):
         """Stop the TCP server"""
@@ -485,12 +660,17 @@ class TCPServer:
         # Re-initialize parsers
         self.parsers = {}
         for listener in self.listeners_config:
+            # Skip disabled listeners
+            if "enabled" in listener and not listener["enabled"]:
+                continue
+                
             port = listener.get("port")
             a_type = listener.get("analyzer_type")
             prot = listener.get("protocol")
             
             if port and a_type and prot:
-                self.parsers[port] = self._create_parser(a_type, prot)
+                listener_name = listener.get("name", f"{a_type} on {port}")
+                self.parsers[port] = self._create_parser(a_type, prot, port, listener_name)
         
         # Update default parser reference
         if self.parsers:

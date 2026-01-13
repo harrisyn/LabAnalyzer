@@ -449,10 +449,11 @@ class SyncManager:
             patient_info = {
                 "db_id": patient[0],
                 "patient_id": patient[1],
-                "name": patient[2],
-                "dob": patient[3],
-                "sex": patient[4],
-                "physician": patient[5]
+                "sample_id": patient[2],
+                "name": patient[3],
+                "dob": patient[4],
+                "sex": patient[5],
+                "physician": patient[6]
             }
             
             # Get patient's results
@@ -512,12 +513,13 @@ class SyncManager:
         }
         
         for result in results:
-            result_id, patient_id, patient_name, test_code, value, unit, flags, timestamp, _ = result
+            result_id, patient_id, sample_id, patient_name, test_code, value, unit, flags, timestamp, _ = result
             
             # Format result data
             payload["results"].append({
                 "id": result_id,
                 "patient_id": patient_id,
+                "sample_id": sample_id,
                 "patient_name": patient_name,
                 "test_code": test_code,
                 "value": value,
