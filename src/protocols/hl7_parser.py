@@ -325,11 +325,13 @@ class HL7Parser(BaseParser):
             test_parts = test_field.split("^")
             raw_test_code = test_parts[0] if test_parts else ""
             
-            # Map numeric test code to human-readable name if available
-            if raw_test_code in LIS2_A_TEST_CODES:
+            # Only map PURELY NUMERIC codes to human-readable names
+            # Preserve text codes like IG%, NEUT#, WBC as-is
+            if raw_test_code.isdigit() and raw_test_code in LIS2_A_TEST_CODES:
                 mapping = LIS2_A_TEST_CODES[raw_test_code]
                 test_code = mapping['name']
             else:
+                # Keep text codes as-is (including % and # suffixes)
                 test_code = raw_test_code
             
             value = fields[5] if len(fields) > 5 else ""

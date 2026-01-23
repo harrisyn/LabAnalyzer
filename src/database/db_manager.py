@@ -282,7 +282,8 @@ class DatabaseManager:
     
     def add_result(self, patient_id, test_code, value, unit, flags=None, timestamp=None, sequence=None):
         """
-        Add a test result to the database
+        Add or update a test result in the database.
+        If a result with the same patient_id and test_code already exists, it will be updated.
         
         Args:
             patient_id: Database ID of the patient
@@ -300,12 +301,31 @@ class DatabaseManager:
             try:
                 conn = self._ensure_connection()
                 cursor = conn.cursor()
+                
+                # Check if result already exists for this patient and test code
                 cursor.execute('''
-                    INSERT INTO results (patient_id, test_code, value, unit, flags, timestamp, sync_status, sequence)
-                    VALUES (?, ?, ?, ?, ?, ?, 'local', ?)
-                ''', (patient_id, test_code, value, unit, flags, timestamp, sequence))
-                conn.commit()
-                return cursor.lastrowid
+                    SELECT id FROM results 
+                    WHERE patient_id = ? AND test_code = ?
+                ''', (patient_id, test_code))
+                existing = cursor.fetchone()
+                
+                if existing:
+                    # Update existing result
+                    cursor.execute('''
+                        UPDATE results 
+                        SET value = ?, unit = ?, flags = ?, timestamp = ?, sync_status = 'local', sequence = ?
+                        WHERE patient_id = ? AND test_code = ?
+                    ''', (value, unit, flags, timestamp, sequence, patient_id, test_code))
+                    conn.commit()
+                    return existing[0]
+                else:
+                    # Insert new result
+                    cursor.execute('''
+                        INSERT INTO results (patient_id, test_code, value, unit, flags, timestamp, sync_status, sequence)
+                        VALUES (?, ?, ?, ?, ?, ?, 'local', ?)
+                    ''', (patient_id, test_code, value, unit, flags, timestamp, sequence))
+                    conn.commit()
+                    return cursor.lastrowid
             except sqlite3.Error as e:
                 self.log_error(f"Database error adding result: {e}")
                 if self.conn:

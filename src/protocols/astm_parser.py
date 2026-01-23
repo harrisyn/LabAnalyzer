@@ -122,8 +122,8 @@ class ASTMParser(BaseParser):
         
         # Analyzer-specific configurations
         if analyzer_type == "SYSMEX XN-L" or analyzer_type == "SYSMEX XN-550":
-            # SYSMEX specific test code pattern
-            self.test_code_pattern = r'\^\^\^\^([A-Za-z0-9\#\_\-\/\?]+)'
+            # SYSMEX specific test code pattern - include % and # for IG%, NEUT#, etc.
+            self.test_code_pattern = r'\^\^\^\^([A-Za-z0-9\%\#\_\-\/\?]+)'
             # Special configuration for SYSMEX
             self.field_positions.update({
                 "patient_id": 4,        # Field 5 (0-indexed) - 1418626
@@ -134,11 +134,11 @@ class ASTMParser(BaseParser):
                 "physician": 14,        # Field 15 (0-indexed) - ^
             })
         elif analyzer_type == "ROCHE COBAS":
-            # Different test code pattern for COBAS
-            self.test_code_pattern = r'([A-Za-z0-9]+)\^'
+            # Different test code pattern for COBAS - include % and # for IG%, NEUT#, etc.
+            self.test_code_pattern = r'([A-Za-z0-9\%\#\_\-]+)\^'
         else:
-            # Generic pattern for most ASTM implementations
-            self.test_code_pattern = r'\^\^\^\^([A-Za-z0-9\#\_\-\/\?]+)'
+            # Generic pattern for most ASTM implementations - include % and # for IG%, NEUT#, etc.
+            self.test_code_pattern = r'\^\^\^\^([A-Za-z0-9\%\#\_\-\/\?]+)'
     
     def set_sync_manager(self, sync_manager):
         """Set the sync manager for real-time synchronization"""
@@ -538,25 +538,25 @@ class ASTMParser(BaseParser):
                 if self.current_variant == "VARIANT_1":
                     # Expecting ^^^1.0000+Code+...
                     # Regex to extract the code: ^^^1.0000\+([0-9]+)\+
-                    match = re.search(r'\^\^\^1\.0000\+([A-Za-z0-9]+)', test_code_complex)
+                    match = re.search(r'\^\^\^1\.0000\+([A-Za-z0-9%#_\-]+)', test_code_complex)
                     if match:
                          raw_code = match.group(1)
                          raw_numeric_code = raw_code
-                         # Map to human readable if available
-                         if raw_code in LIS2_A_TEST_CODES:
+                         # Only map PURELY NUMERIC codes to human readable names
+                         # Preserve text codes like IG%, NEUT#, WBC as-is
+                         if raw_code.isdigit() and raw_code in LIS2_A_TEST_CODES:
                              mapping = LIS2_A_TEST_CODES[raw_code]
                              result['test_code'] = mapping['name']
-                             
-                             # Also normalize unit if not provided or override if strictly defined
-                             # (Optional: prefer analyzer unit if present, but normalize string)
                          else:
+                             # Keep text codes as-is (including % and # suffixes)
                              result['test_code'] = raw_code
                     else:
-                         # Fallback for V1
+                         # Fallback for V1 - preserve special characters
                          result['test_code'] = test_code_complex.strip().strip('^')
                 elif self.current_variant == "VARIANT_2":
-                    # Expecting ^^^^Code
-                    match = re.search(r'\^\^\^\^([A-Za-z0-9]+)', test_code_complex)
+                    # Expecting ^^^^Code or ^^^^Code^sequence
+                    # Include % and # in allowed characters to preserve IG%, NEUT#, etc.
+                    match = re.search(r'\^\^\^\^([A-Za-z0-9%#_\-\/\?]+)', test_code_complex)
                     if match:
                         result['test_code'] = match.group(1)
                     else:
@@ -569,18 +569,19 @@ class ASTMParser(BaseParser):
                 else:
                     # Unknown or Generic - try to detect format dynamically
                     # First try VARIANT_1 pattern (^^^1.0000+CODE+...)
-                    match = re.search(r'\^\^\^1\.0000\+([A-Za-z0-9]+)', test_code_complex)
+                    match = re.search(r'\^\^\^1\.0000\+([A-Za-z0-9%#_\-]+)', test_code_complex)
                     if match:
                         raw_code = match.group(1)
                         raw_numeric_code = raw_code
-                        # Map to human readable if available
-                        if raw_code in LIS2_A_TEST_CODES:
+                        # Only map PURELY NUMERIC codes to human readable names
+                        if raw_code.isdigit() and raw_code in LIS2_A_TEST_CODES:
                             mapping = LIS2_A_TEST_CODES[raw_code]
                             result['test_code'] = mapping['name']
                         else:
+                            # Keep text codes as-is (including % and # suffixes)
                             result['test_code'] = raw_code
                     else:
-                        # Try generic pattern
+                        # Try generic pattern - include special chars
                         test_code_match = re.search(self.test_code_pattern, test_code_complex)
                         if test_code_match:
                             result['test_code'] = test_code_match.group(1)
