@@ -314,6 +314,12 @@ class VitrosParser(BaseParser):
             
             patient_id = fields[3].strip() if len(fields) > 3 else ""
             self.current_sample_id = fields[2].strip() if len(fields) > 2 else ""
+
+            # FIX: Extract patient ID and sample ID correctly
+            if '^' in patient_id:
+                patient_id = patient_id.split('^')[0].strip()
+            if '^' in self.current_sample_id:
+                self.current_sample_id = self.current_sample_id.split('^')[0].strip()
             
             # Name field is typically field 4, may use ^ as separator for last^first format
             name_field = fields[4].strip() if len(fields) > 4 else ""
@@ -382,6 +388,8 @@ class VitrosParser(BaseParser):
             # Extract sample ID if present
             if len(fields) > 3:
                 sample_id = fields[2].strip()
+                if '^' in sample_id:
+                    sample_id = sample_id.split('^')[0].strip()
                 if sample_id:
                     self.current_sample_id = sample_id
                     self.log_info(f"Sample ID updated: {sample_id}")
@@ -414,6 +422,8 @@ class VitrosParser(BaseParser):
             # Update current sample ID if provided
             if result['sample_id']:
                 self.current_sample_id = result['sample_id']
+                if '^' in self.current_sample_id:
+                    self.current_sample_id = self.current_sample_id.split('^')[0].strip()
             
             # Extract test information
             if len(fields) > 2:

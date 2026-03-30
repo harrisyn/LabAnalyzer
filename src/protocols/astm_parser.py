@@ -290,12 +290,12 @@ class ASTMParser(BaseParser):
         """Extract patient information from P record fields"""
         try:
             # Get field positions from configuration
-            patient_id_pos = self.field_positions["patient_id"]
-            sample_id_pos = self.field_positions["sample_id"]
-            name_pos = self.field_positions["patient_name"]
-            dob_pos = self.field_positions["date_of_birth"]
-            sex_pos = self.field_positions["sex"]
-            physician_pos = self.field_positions["physician"]
+            patient_id_pos = self.field_positions["patient_id"].split('^')[0].strip() if '^' in self.field_positions["patient_id"] else self.field_positions["patient_id"]
+            sample_id_pos = self.field_positions["sample_id"].split('^')[0].strip() if '^' in self.field_positions["sample_id"] else self.field_positions["sample_id"]
+            name_pos = self.field_positions["patient_name"].split('^')[0].strip() if '^' in self.field_positions["patient_name"] else self.field_positions["patient_name"]
+            dob_pos = self.field_positions["date_of_birth"].split('^')[0].strip() if '^' in self.field_positions["date_of_birth"] else self.field_positions["date_of_birth"]
+            sex_pos = self.field_positions["sex"].split('^')[0].strip() if '^' in self.field_positions["sex"] else self.field_positions["sex"]
+            physician_pos = self.field_positions["physician"].split('^')[0].strip() if '^' in self.field_positions["physician"] else self.field_positions["physician"]
             
             # Extract patient ID
             if len(fields) > patient_id_pos and fields[patient_id_pos]:
@@ -445,6 +445,8 @@ class ASTMParser(BaseParser):
                 if patient_id_match:
                     patient_id = patient_id_match.group(1).strip()
                     if patient_id:
+                        if '^' in patient_id:
+                            patient_id = patient_id.split('^')[0].strip()
                         message_info['patient_id'] = patient_id
                         self.log_info(f"Extracted patient ID from O record: {patient_id}")
                         return
@@ -453,6 +455,8 @@ class ASTMParser(BaseParser):
                 parts = order_field.split('^')
                 for part in parts:
                     part = part.strip()
+                    if '^' in part:
+                        part = part.split('^')[0].strip()
                     if part and part.isdigit():
                         message_info['patient_id'] = part
                         self.log_info(f"Extracted patient ID from O record (alternative method): {part}")
@@ -463,6 +467,8 @@ class ASTMParser(BaseParser):
             if len(fields) > patient_id_pos and fields[patient_id_pos]:
                 patient_id = fields[patient_id_pos].strip()
                 if patient_id:
+                    if '^' in patient_id:
+                        patient_id = patient_id.split('^')[0].strip()
                     message_info['patient_id'] = patient_id
                     self.log_info(f"Extracted patient ID from O record standard position: {patient_id}")
                     return
