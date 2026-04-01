@@ -78,7 +78,7 @@ class HL7Parser(BaseParser):
             
             if start_idx < end_idx:
                 # Extract the message without VT and FS markers
-                message = self.buffer[start_idx + 1:end_idx].decode('ascii', errors='replace')
+                message = self.buffer[start_idx + 1:end_idx].decode('latin-1', errors='replace')
                 
                 # Process the HL7 message
                 await self.process_message(message)
