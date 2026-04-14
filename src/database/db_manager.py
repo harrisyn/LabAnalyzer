@@ -169,8 +169,9 @@ class DatabaseManager:
                 existing_patient_id = None
                 
                 # If updating an existing patient directly by database ID
+                patient_id = patient_id.split('^')[0].strip() if '^' in patient_id else patient_id
                 if isinstance(patient_id, int):
-                    existing_patient_id = patient_id.split('^')[0].strip() if '^' in patient_id else patient_id
+                    existing_patient_id = patient_id
                 else:
                     # First try to find by patient_id if provided
                     if patient_id:
