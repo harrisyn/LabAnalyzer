@@ -561,81 +561,203 @@ REFERENCE_RANGES = {
     "307": (32, 36),          # MCHC g/dL
     "308": (150, 400),        # PLT 10^9/L
     "309": (11.5, 14.5),      # RDW-CV %
+    "310": (35, 56),          # RDW-SD fL
     "311": (7.5, 11.5),       # MPV fL
-    
+    "312": (9, 17),           # PDW fL
+    "313": (0.1, 0.5),        # PCT %
+    "314": (13, 43),          # P-LCR %
+    "315": (30, 90),          # P-LCC 10^9/L
+
     # Differential %
-    "320": (40, 75),          # NEUT% 
+    "320": (40, 75),          # NEUT%
     "321": (20, 45),          # LYMPH%
     "322": (2, 10),           # MONO%
     "323": (1, 6),            # EO%
     "324": (0, 2),            # BASO%
-    
+    "325": (0, 4),            # LUC%
+    "326": (0, 0.5),          # IG%
+
+    # Differential absolute 10^9/L
+    "327": (1.0, 3.2),        # LYMPH# (alt code)
+    "328": (0.1, 1.0),        # MONO# (alt code)
+    "329": (0.02, 0.5),       # EO# (alt code)
+    "330": (1.8, 7.5),        # NEUT#
+    "331": (1.0, 3.2),        # LYMPH#
+    "332": (0.1, 1.0),        # MONO#
+    "333": (0.02, 0.5),       # EO#
+    "334": (0, 0.1),          # BASO#
+    "335": (0, 0.4),          # LUC#
+    "336": (0, 0.05),         # IG#
+
     # Reticulocyte
     "340": (0.5, 2.5),        # RET%
+    "341": (0.02, 0.1),       # RET# 10^12/L
+    "342": (0, 24),           # IRF %
+    "343": (68, 95),          # LFR %
+    "344": (3, 21),           # MFR %
+    "345": (0, 4),            # HFR %
     "346": (28, 35),          # RET-He pg
-    
-    # Legacy CBC codes
+    "347": (-2.0, 2.0),       # Delta-He pg
+
+    # NRBC
+    "350": (0, 0),            # NRBC% (normally 0)
+    "351": (0, 0),            # NRBC# (normally 0)
+
+    # Extended differential (no universal range — flag only when clearly abnormal)
+    "360": (0, 5),            # ATYP%
+    "362": (0, 0),            # BLAST% (normally 0)
+    "364": (0, 5),            # BAND%
+    "380": (0, 7),            # IPF%
+    "383": (0, 2.5),          # HYPO-He%
+    "384": (0, 4),            # HYPER-He%
+    "385": (0, 2.5),          # MicroR%
+    "386": (0, 3),            # MacroR%
+    "387": (0, 0.5),          # FRC%
+
+    # ESR mm/hr (age-independent conservative range)
+    "400": (0, 20),           # ESR
+    "401": (0, 20),           # ESR-1H
+    "402": (0, 30),           # ESR-2H
+
+    # Legacy CBC codes (950-series)
     "950": (4.0, 11.0),       # WBC
     "951": (4.0, 5.5),        # RBC
     "952": (120, 170),        # HGB
+    "953": (36, 50),          # HCT
+    "954": (80, 100),         # MCV
+    "955": (27, 33),          # MCH
+    "956": (32, 36),          # MCHC
     "957": (150, 400),        # PLT
-    
+    "958": (11.5, 14.5),      # RDW
+    "959": (7.5, 11.5),       # MPV
+    "960": (40, 75),          # NEUT%
+    "961": (20, 45),          # LYMPH%
+    "962": (2, 10),           # MONO%
+    "963": (1, 6),            # EO%
+    "964": (0, 2),            # BASO%
+    "965": (1.8, 7.5),        # NEUT#
+    "966": (1.0, 3.2),        # LYMPH#
+    "967": (0.1, 1.0),        # MONO#
+    "968": (0.02, 0.5),       # EO#
+    "969": (0, 0.1),          # BASO#
+    "970": (0, 0.5),          # IG%
+    "971": (0, 0.05),         # IG#
+    "972": (0.5, 2.5),        # RET%
+    "973": (0.02, 0.1),       # RET#
+    "974": (0, 24),           # IRF
+
     # Liver function
     "1001": (7, 56),          # ALT U/L
     "1002": (10, 40),         # AST U/L
     "1003": (44, 147),        # ALP U/L
     "1004": (9, 48),          # GGT U/L
     "1005": (3.4, 20.5),      # TBIL μmol/L
+    "1006": (1.7, 8.6),       # DBIL μmol/L
+    "1007": (1.7, 12.0),      # IBIL μmol/L
     "1008": (60, 83),         # TP g/L
     "1009": (35, 50),         # ALB g/L
-    
+    "1010": (20, 35),         # GLOB g/L
+    "1011": (1.2, 2.0),       # A/G ratio
+    "1012": (120, 246),       # LDH U/L
+    "1014": (4000, 12000),    # CHE U/L
+    "1015": (200, 400),       # PALB mg/L
+
     # Renal
     "1020": (45, 110),        # CREA μmol/L
     "1021": (2.5, 7.1),       # BUN mmol/L
     "1022": (2.5, 7.8),       # UREA mmol/L
     "1024": (150, 420),       # UA μmol/L
-    
+    "1025": (0.51, 0.98),     # CysC mg/L
+    "1028": (0, 30),          # MALB mg/L
+
     # Electrolytes
     "1030": (136, 145),       # Na mmol/L
     "1031": (3.5, 5.1),       # K mmol/L
     "1032": (98, 106),        # Cl mmol/L
     "1033": (2.15, 2.55),     # Ca mmol/L
+    "1034": (1.15, 1.35),     # iCa mmol/L
     "1035": (0.66, 1.07),     # Mg mmol/L
     "1036": (0.81, 1.45),     # PHOS mmol/L
-    
+    "1037": (22, 29),         # CO2/HCO3 mmol/L
+    "1039": (275, 295),       # OSM mOsm/kg
+
     # Lipids
     "1040": (0, 5.2),         # CHOL mmol/L
     "1041": (0, 1.7),         # TG mmol/L
-    "1042": (1.0, 999),       # HDL mmol/L (>1.0 desired)
+    "1042": (1.0, 999),       # HDL mmol/L
     "1043": (0, 3.4),         # LDL mmol/L
-    
-    # Glucose
+    "1044": (0, 4.1),         # VLDL mmol/L
+    "1048": (1.0, 1.76),      # ApoA1 g/L
+    "1049": (0.52, 1.09),     # ApoB g/L
+
+    # Glucose / Diabetes
     "1060": (3.9, 5.6),       # GLU fasting mmol/L
+    "1061": (3.9, 5.6),       # FPG mmol/L
     "1062": (4.0, 5.6),       # HbA1c %
-    
-    # Cardiac
+    "1063": (4.0, 5.6),       # NGSP %
+    "1065": (20, 38),         # IFCC mmol/mol
+    "1066": (200, 285),       # FRU μmol/L
+
+    # Cardiac markers
+    "1070": (0, 0.04),        # cTnI μg/L
+    "1071": (0, 0.01),        # cTnT μg/L
+    "1072": (0, 5),           # BNP pmol/L
+    "1073": (0, 125),         # NT-proBNP pg/mL
     "1074": (30, 200),        # CK U/L
-    
+    "1075": (0, 24),          # CKMB U/L
+    "1076": (0, 7),           # MYO μg/L
+
     # Inflammatory
+    "1080": (0, 10),          # ESR mm/hr (chemistry panel)
     "1085": (0, 10),          # CRP mg/L
     "1086": (0, 3),           # hsCRP mg/L
-    
+    "1087": (0, 10),          # IL-6 pg/mL
+    "1088": (0, 500),         # PCT ng/mL (sepsis threshold 0.5)
+    "1089": (0, 0.5),         # SAA mg/L
+
     # Thyroid
     "1100": (0.4, 4.0),       # TSH mIU/L
     "1101": (3.1, 6.8),       # FT3 pmol/L
     "1102": (12, 22),         # FT4 pmol/L
-    
-    # Iron
+    "1103": (1.2, 2.7),       # T3 nmol/L
+    "1104": (66, 181),        # T4 nmol/L
+
+    # Iron studies
     "1110": (10, 30),         # FE μmol/L
+    "1111": (45, 80),         # TIBC μmol/L
+    "1112": (20, 55),         # UIBC μmol/L
+    "1113": (20, 50),         # TSAT %
     "1114": (20, 250),        # FERR μg/L
-    
+
+    # Bone / Calcium metabolism
+    "1120": (9, 55),          # PTH pmol/L (×0.094 for ng/L)
+    "1121": (20, 50),         # Vit D nmol/L (sufficiency >50)
+
+    # Pancreatic
+    "1130": (0, 100),         # AMY U/L
+    "1131": (0, 60),          # LIP U/L
+
     # Coagulation
     "2001": (11, 14),         # PT sec
     "2002": (0.8, 1.2),       # INR
+    "2003": (70, 120),        # PT% activity
     "2004": (25, 35),         # APTT sec
+    "2005": (0.75, 1.25),     # APTT ratio
+    "2006": (15, 21),         # TT sec
+    "2007": (85, 120),        # FV activity %
+    "2008": (70, 150),        # FVIII activity %
+    "2009": (70, 130),        # FIX activity %
     "2010": (2.0, 4.0),       # FIB g/L
+    "2011": (70, 120),        # FX activity %
+    "2012": (80, 120),        # FXII activity %
     "2014": (0, 0.5),         # D-Dimer mg/L FEU
+    "2015": (0, 0.5),         # D-Dimer μg/mL DDU
+    "2016": (0, 10),          # FDP μg/mL
+    "2017": (0, 8),           # XL-FDP μg/mL
+    "2018": (0, 8),           # PAP μg/mL
     "2020": (80, 120),        # AT %
+    "2021": (70, 130),        # PC activity %
+    "2022": (70, 130),        # PS free %
 }
 
 # =============================================================================

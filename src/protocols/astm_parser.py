@@ -290,7 +290,6 @@ class ASTMParser(BaseParser):
                 target=self._background_process_message,
                 args=(message_info,)
             )
-            processing_thread.daemon = True
             processing_thread.start()
             
             return True
@@ -809,7 +808,8 @@ class ASTMParser(BaseParser):
                         result['unit'],
                         result['flags'],
                         None,  # Use default timestamp
-                        result['sequence']
+                        result['sequence'],
+                        result.get('ref_range')
                     )
                     
                     if result_id:

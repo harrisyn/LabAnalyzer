@@ -6,7 +6,7 @@ import aiohttp
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from croniter import croniter
 
 class SyncManager:
@@ -36,6 +36,7 @@ class SyncManager:
         self.retry_delay = int(ext_server_config.get("retry_interval", 60))
         self.initial_retry_delay = self.retry_delay  # Keep the initial value for resets
         self.max_retry_delay = 300  # Maximum retry delay (5 minutes)
+        self._oauth2_token_lock = None  # Created lazily inside the event loop
 
     async def start(self):
         """Start the sync manager based on configuration"""
@@ -316,62 +317,57 @@ class SyncManager:
             self.logger.error("OAuth2 token URL or client ID not configured")
             return None
             
-        try:
-            # Check if we have a cached token that's still valid
+        if self._oauth2_token_lock is None:
+            self._oauth2_token_lock = asyncio.Lock()
+
+        async with self._oauth2_token_lock:
+            # Re-check inside lock: another coroutine may have refreshed while we waited
             if hasattr(self, 'oauth2_token') and hasattr(self, 'oauth2_token_expires'):
                 if datetime.now() < self.oauth2_token_expires:
-                    # Token still valid, reuse it
                     self.logger.debug("Reusing existing OAuth2 token")
                     return self.oauth2_token
-            
-            # Prepare token request
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json"
-            }
-            
-            data = {
-                "grant_type": "client_credentials",
-                "client_id": client_id,
-            }
-            
-            if client_secret:
-                data["client_secret"] = client_secret
-                
-            if scope:
-                data["scope"] = scope
-                
-            auth = None
-            # Some servers expect client credentials in the Authorization header
-            if client_secret:
-                auth = aiohttp.BasicAuth(client_id, client_secret)
-            
-            self.logger.debug(f"Requesting OAuth2 token from {token_url}")
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(token_url, data=data, headers=headers, auth=auth) as response:
-                    if response.status == 200:
-                        token_data = await response.json()
-                        
-                        # Extract token and expiry
-                        access_token = token_data.get("access_token")
-                        expires_in = token_data.get("expires_in", 3600)  # Default to 1 hour
-                        
-                        if access_token:
-                            # Store token and expiry time (with a small safety margin)
-                            self.oauth2_token = access_token
-                            self.oauth2_token_expires = datetime.now() + \
-                                                     datetime.timedelta(seconds=int(expires_in * 0.9))
-                            self.logger.info("Successfully obtained OAuth2 token")
-                            return access_token
-                            
-                    error_text = await response.text()
-                    self.logger.error(f"Failed to get OAuth2 token: HTTP {response.status}: {error_text}")
-                    return None
-                    
-        except Exception as e:
-            self.logger.error(f"Error obtaining OAuth2 token: {str(e)}")
-            return None
+
+            try:
+                headers = {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json"
+                }
+
+                data = {
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                }
+
+                if client_secret:
+                    data["client_secret"] = client_secret
+
+                if scope:
+                    data["scope"] = scope
+
+                auth = aiohttp.BasicAuth(client_id, client_secret) if client_secret else None
+
+                self.logger.debug(f"Requesting OAuth2 token from {token_url}")
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(token_url, data=data, headers=headers, auth=auth) as response:
+                        if response.status == 200:
+                            token_data = await response.json()
+                            access_token = token_data.get("access_token")
+                            expires_in = token_data.get("expires_in", 3600)
+
+                            if access_token:
+                                self.oauth2_token = access_token
+                                self.oauth2_token_expires = datetime.now() + timedelta(seconds=int(expires_in * 0.9))
+                                self.logger.info("Successfully obtained OAuth2 token")
+                                return access_token
+
+                        error_text = await response.text()
+                        self.logger.error(f"Failed to get OAuth2 token: HTTP {response.status}: {error_text}")
+                        return None
+
+            except Exception as e:
+                self.logger.error(f"Error obtaining OAuth2 token: {str(e)}")
+                return None
     
     async def sync_patient(self, patient_data):
         """
@@ -589,7 +585,7 @@ class SyncManager:
                 
                 # If today's scheduled time has passed, schedule for tomorrow
                 if next_run <= now:
-                    next_run = next_run.replace(day=now.day + 1)
+                    next_run = next_run + timedelta(days=1)
                     
                 # Calculate wait time in seconds
                 wait_seconds = (next_run - now).total_seconds()

@@ -1,7 +1,7 @@
 import sqlite3
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -62,6 +62,7 @@ class DatabaseManager:
                         value REAL,
                         unit TEXT,
                         flags TEXT,
+                        ref_range TEXT,
                         timestamp DATETIME,
                         sync_status TEXT DEFAULT 'local',
                         sequence TEXT,
@@ -88,12 +89,18 @@ class DatabaseManager:
                 if 'listener_name' not in columns:
                     cursor.execute('ALTER TABLE patients ADD COLUMN listener_name TEXT')
 
-                # Check if sequence column exists in results table
+                # Check if sequence/ref_range columns exist in results table
                 cursor.execute("PRAGMA table_info(results)")
                 result_columns = {info[1] for info in cursor.fetchall()}
-                
+
                 if 'sequence' not in result_columns:
                     cursor.execute('ALTER TABLE results ADD COLUMN sequence TEXT')
+
+                if 'ref_range' not in result_columns:
+                    cursor.execute('ALTER TABLE results ADD COLUMN ref_range TEXT')
+
+                # Enable WAL mode for better concurrent read/write performance
+                conn.execute('PRAGMA journal_mode=WAL')
 
                 # Create logs table for application events
                 cursor.execute('''
@@ -280,22 +287,23 @@ class DatabaseManager:
                 self.log_error(f"Database error getting patient ID by sample_id: {e}")
                 return None
     
-    def add_result(self, patient_id, test_code, value, unit, flags=None, timestamp=None, sequence=None):
+    def add_result(self, patient_id, test_code, value, unit, flags=None, timestamp=None, sequence=None, ref_range=None):
         """
         Add or update a test result in the database.
         If a result with the same patient_id and test_code already exists, it will be updated.
-        
+
         Args:
             patient_id: Database ID of the patient
             test_code: Test code identifier
             value: Test result value
             unit: Unit of measurement
             flags: Any flags for the test result
-            timestamp: Timestamp of the result, defaults to current time if not provided
+            timestamp: Timestamp of the result, defaults to current UTC time if not provided
             sequence: Sequence number from ASTM record for maintaining result order
+            ref_range: Reference range string (e.g. "3.9-5.6")
         """
         if timestamp is None:
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
             
         with self.lock:
             try:
@@ -312,18 +320,18 @@ class DatabaseManager:
                 if existing:
                     # Update existing result
                     cursor.execute('''
-                        UPDATE results 
-                        SET value = ?, unit = ?, flags = ?, timestamp = ?, sync_status = 'local', sequence = ?
+                        UPDATE results
+                        SET value = ?, unit = ?, flags = ?, ref_range = ?, timestamp = ?, sync_status = 'local', sequence = ?
                         WHERE patient_id = ? AND test_code = ?
-                    ''', (value, unit, flags, timestamp, sequence, patient_id, test_code))
+                    ''', (value, unit, flags, ref_range, timestamp, sequence, patient_id, test_code))
                     conn.commit()
                     return existing[0]
                 else:
                     # Insert new result
                     cursor.execute('''
-                        INSERT INTO results (patient_id, test_code, value, unit, flags, timestamp, sync_status, sequence)
-                        VALUES (?, ?, ?, ?, ?, ?, 'local', ?)
-                    ''', (patient_id, test_code, value, unit, flags, timestamp, sequence))
+                        INSERT INTO results (patient_id, test_code, value, unit, flags, ref_range, timestamp, sync_status, sequence)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'local', ?)
+                    ''', (patient_id, test_code, value, unit, flags, ref_range, timestamp, sequence))
                     conn.commit()
                     return cursor.lastrowid
             except sqlite3.Error as e:
