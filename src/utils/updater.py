@@ -163,13 +163,18 @@ class UpdateChecker:
         """Download and install the new version"""
         try:
             # Check for existing recent download
+            installer_path = None
             if latest_version:
                 last_info = self._get_last_downloaded_info()
                 today = time.strftime("%Y-%m-%d")
-                if last_info and last_info.get("version") == latest_version and last_info.get("timestamp") == today:
-                    installer_path = Path(last_info.get("path"))
-                    if installer_path.exists() and installer_path.stat().st_size > 0:
-                        print(f"Reusing previously downloaded installer for version {latest_version}: {installer_path}")
+                cached_path_str = last_info.get("path") if last_info else None
+                if (last_info and cached_path_str
+                        and last_info.get("version") == latest_version
+                        and last_info.get("timestamp") == today):
+                    cached_path = Path(cached_path_str)
+                    if cached_path.exists() and cached_path.stat().st_size > 0:
+                        print(f"Reusing previously downloaded installer for version {latest_version}: {cached_path}")
+                        installer_path = cached_path
                         download_success = True
                     else:
                         print("Last downloaded installer missing or empty, will re-download.")
@@ -181,7 +186,6 @@ class UpdateChecker:
 
             if not download_success:
                 print(f"Downloading update from {download_url}")
-                # Determine if we're downloading a zip or exe
                 is_zip = download_url.endswith('.zip')
                 download_path = self.temp_dir / ("installer.zip" if is_zip else "LabSync-Setup.exe")
 
@@ -225,9 +229,10 @@ class UpdateChecker:
                     status_var.set(message)
                     progress_window.update()
 
-                # Download with progress tracking
+                # Download with progress tracking (60 s connect, 5 min total)
+                download_timeout = aiohttp.ClientTimeout(connect=60, total=300)
                 try:
-                    async with aiohttp.ClientSession() as session:
+                    async with aiohttp.ClientSession(timeout=download_timeout) as session:
                         async with session.get(download_url) as response:
                             if response.status != 200:
                                 progress_window.destroy()
@@ -321,15 +326,12 @@ class UpdateChecker:
                     return
 
                 print(f"Installer ready: {installer_path}")
-                # Record last downloaded info
-                if latest_version:
-                    self._set_last_downloaded_info(latest_version, installer_path)
-                
-            print(f"Installer ready: {installer_path}")
-            
-            # Record last downloaded info
-            if latest_version:
+
+            # Record the installer location (skip when reusing a cached path already recorded)
+            if latest_version and not download_success:
                 self._set_last_downloaded_info(latest_version, installer_path)
+
+            print(f"Installer ready: {installer_path}")
             
             # Display message to user
             messagebox.showinfo("Update Ready", 
@@ -351,14 +353,14 @@ class UpdateChecker:
                 print(f"Failed to launch installer: {e}")
                 # Try fallback with subprocess
                 try:
-                    subprocess.Popen([str(installer_path)], shell=True)
+                    subprocess.Popen(str(installer_path), shell=True)
                     print("Installer launched via subprocess.")
                 except Exception as e2:
                     messagebox.showerror("Update Error", f"Failed to start installer: {e}\n\nPlease run it manually from:\n{installer_path}")
                     return
             
             # Allow the update process to start properly before exiting the app
-            time.sleep(1)
+            await asyncio.sleep(1)
             
             # Display a final message before exiting
             print("Update process launched successfully. Shutting down application...")
@@ -429,5 +431,8 @@ class UpdateChecker:
     async def check_updates_periodically(self, interval_hours=24):
         """Check for updates periodically"""
         while True:
-            await self.check_for_updates()
-            await asyncio.sleep(interval_hours * 3600)  # Convert hours to seconds
+            try:
+                await self.check_for_updates()
+            except Exception as e:
+                print(f"Periodic update check failed (will retry in {interval_hours}h): {e}")
+            await asyncio.sleep(interval_hours * 3600)
