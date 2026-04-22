@@ -13,7 +13,7 @@ class DatabaseManager:
     
     def __init__(self, db_file=None):
         # Use LOCALAPPDATA for persistent database storage
-        default_dir = Path(os.getenv('LOCALAPPDATA')) / 'LabSync'
+        default_dir = Path(os.getenv('LOCALAPPDATA') or os.path.expanduser('~')) / 'LabSync'
         default_dir.mkdir(parents=True, exist_ok=True)
         if db_file is None:
             db_file = default_dir / 'astm_data.db'

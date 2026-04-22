@@ -13,7 +13,7 @@ class Config:
     """
     def __init__(self, config_path=None):
         # Use LOCALAPPDATA for persistent config storage
-        default_dir = Path(os.getenv('LOCALAPPDATA')) / 'LabSync'
+        default_dir = Path(os.getenv('LOCALAPPDATA') or os.path.expanduser('~')) / 'LabSync'
         default_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = config_path or (default_dir / CONFIG_FILE)
         self.config = self._load_config()

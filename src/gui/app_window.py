@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from datetime import datetime
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 import threading
@@ -133,10 +134,6 @@ class ApplicationWindow:
         self.scatter_canvas = None
         self.scatter_image = None
 
-    def update_ui_status(self):
-        """Update UI status (alias for dashboard update)"""
-        self._update_dashboard_status()
-        
     def _create_menu(self):
         """Create the application menu bar"""
         menubar = tk.Menu(self.root)
@@ -159,14 +156,25 @@ class ApplicationWindow:
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Check for Updates", command=self._check_for_updates_manual)
         help_menu.add_separator()
-        help_menu.add_command(label="Show Data Paths", command=self._show_data_paths)
+        help_menu.add_command(label="Open Data Path", command=self._open_data_path)
         help_menu.add_command(label="About", command=self._show_about)
-    def _show_data_paths(self):
-        """Show a dialog with the config and database file paths"""
-        config_path = self.config.get_config_path() if hasattr(self.config, 'get_config_path') else str(getattr(self.config, 'config_path', 'Unknown'))
-        db_path = self.db_manager.get_db_path() if hasattr(self.db_manager, 'get_db_path') else str(getattr(self.db_manager, 'db_file', 'Unknown'))
-        msg = f"Config file path:\n{config_path}\n\nDatabase file path:\n{db_path}"
-        messagebox.showinfo("Data File Paths", msg)
+    def _open_data_path(self):
+        """Open the folder containing the application's data files"""
+        try:
+            db_path = self.db_manager.get_db_path() if hasattr(self.db_manager, 'get_db_path') else str(getattr(self.db_manager, 'db_file', ''))
+            data_dir = os.path.dirname(db_path) if db_path else ''
+
+            if not data_dir or not os.path.isdir(data_dir):
+                config_path = self.config.get_config_path() if hasattr(self.config, 'get_config_path') else str(getattr(self.config, 'config_path', ''))
+                data_dir = os.path.dirname(config_path) if config_path else ''
+
+            if not data_dir or not os.path.isdir(data_dir):
+                raise FileNotFoundError("Data folder not found")
+
+            os.startfile(data_dir)
+        except Exception as e:
+            self.logger.error(f"Failed to open data path: {e}")
+            messagebox.showerror("Open Data Path", f"Unable to open the data folder:\n{e}")
         
     def _show_settings(self):
         """Show the configuration dialog"""
@@ -442,10 +450,10 @@ Features:
         clients_label.pack(anchor=tk.W)
         
         # Store references in the frame widget itself
-        frame.status_label = status_label
-        frame.clients_label = clients_label
-        frame.listener_name = name  # Store name for filtering
-        frame.is_enabled = enabled # Store enabled state
+        setattr(frame, 'status_label', status_label)
+        setattr(frame, 'clients_label', clients_label)
+        setattr(frame, 'listener_name', name)  # Store name for filtering
+        setattr(frame, 'is_enabled', enabled)  # Store enabled state
         
         # Make entire card clickable to filter by this listener (except button)
         def on_card_click(event):
@@ -649,7 +657,7 @@ Features:
             self.toggle_button.config(text="▼ Show Filters")
             self.filter_visible.set(False)
         else:
-            self.filter_frame.pack(fill=tk.X, padx=5, pady=(0, 5), after=self.toggle_button.winfo_parent())
+            self.filter_frame.pack(fill=tk.X, padx=5, pady=(0, 5), after=self.toggle_button)
             self.toggle_button.config(text="▲ Hide Filters")
             self.filter_visible.set(True)
 
@@ -1237,7 +1245,7 @@ Features:
             self.scatter_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
             
             # Create matplotlib figure
-            self.figure = plt.Figure(figsize=(6, 4), dpi=100)
+            self.figure = Figure(figsize=(6, 4), dpi=100)
             self.scatter_plot = self.figure.add_subplot(111)
             self.scatter_canvas = FigureCanvasTkAgg(self.figure, self.scatter_frame)
             self.scatter_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -1256,7 +1264,7 @@ Features:
             
     def update_scattergram(self, data):
         """Update the scattergram display"""
-        if self.scatter_frame and self.scatter_plot:
+        if self.scatter_frame and self.scatter_plot and self.scatter_canvas:
             self.scatter_plot.clear()
             self.scatter_plot.imshow(data, cmap='viridis')
             self.scatter_canvas.draw()
@@ -1285,8 +1293,7 @@ Features:
             port = self.config.get('port', 5000)
             self.root.after(0, lambda: [
                 self.server_status.config(text=f"Server: Running on port {port}"),
-                self.start_button.config(state=tk.DISABLED),
-                self.port_status.config(text=f"Port: {port} (Active)")
+                self.start_button.config(state=tk.DISABLED)
             ])
             
             # Start sync manager if enabled
@@ -1327,13 +1334,6 @@ Features:
         """Update UI when server stops"""
         self._update_dashboard_status()
         self.log("Server stopped")
-
-    def update_connection_count(self):
-        """Update the connection count display"""
-        if self.tcp_server:
-            count = self.tcp_server.get_client_count()
-            self.connection_status.config(text=f"Connections: {count}")
-            self.connection_count_label.config(text=f"Connections: {count}")
 
     def log_connection(self, host, port):
         """Log a new connection"""
@@ -1680,8 +1680,8 @@ Features:
                 os.path.join(bundle_dir, '_internal', 'src', 'gui', 'resources'),
             ])
             # Also try sys._MEIPASS which is the PyInstaller temp folder
-            if hasattr(sys, '_MEIPASS'):
-                meipass = sys._MEIPASS
+            meipass = getattr(sys, '_MEIPASS', None)
+            if meipass:
                 base_paths.extend([
                     meipass,
                     os.path.join(meipass, 'gui', 'resources'),
@@ -1777,7 +1777,7 @@ Features:
     def _show_tray_notification(self):
         """Show initial system tray notification"""
         try:
-            if hasattr(self.tray_icon, 'notify'):
+            if self.tray_icon and hasattr(self.tray_icon, 'notify'):
                 self.tray_icon.notify("LabSync is running in the system tray. Click the X button to minimize to tray.")
         except Exception as e:
             self.logger.debug(f"Could not show tray notification: {e}")

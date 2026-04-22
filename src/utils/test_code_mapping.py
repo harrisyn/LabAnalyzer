@@ -828,7 +828,7 @@ def normalize_unit(unit: str) -> str:
     return UNIT_NORMALIZATION.get(unit, unit)
 
 
-def get_reference_range(code: str) -> tuple:
+def get_reference_range(code: str) -> tuple | None:
     """
     Get reference range for a test code.
     
