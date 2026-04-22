@@ -240,7 +240,7 @@ class HL7Parser(BaseParser):
            # Try field 2 first (External ID), then field 3 (Internal ID)
             patient_id = fields[2].strip() if len(fields) > 2 and fields[2].strip() else ""
             if not patient_id:
-                patient_id = fields[3].strip() if len(fields) > 3 else ""
+                patient_id = fields[3].split('^')[0].strip() if len(fields) > 3 else ""
             
             # Sample ID will be extracted from OBR segment
             sample_id = ""
@@ -314,7 +314,7 @@ class HL7Parser(BaseParser):
             # OBR segment format:
             # OBR|set_id|placer_order|filler_order|universal_service_id|...
             # Field 3 contains Filler Order Number (sample/specimen ID)
-            sample_id = fields[3].strip() if len(fields) > 3 else ""
+            sample_id = fields[3].split('^')[0].strip() if len(fields) > 3 else ""
             
             return {"sample_id": sample_id}
         except Exception as e:

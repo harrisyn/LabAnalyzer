@@ -176,6 +176,7 @@ class DatabaseManager:
                 existing_patient_id = None
                 
                 # If updating an existing patient directly by database ID
+                patient_id = patient_id.split('^')[0].strip() if '^' in patient_id else patient_id
                 if isinstance(patient_id, int):
                     existing_patient_id = patient_id
                 else:
@@ -188,6 +189,7 @@ class DatabaseManager:
                     
                     # If no match found and sample_id is provided, try to find by sample_id
                     if not existing_patient_id and sample_id:
+                        sample_id = sample_id.split('^')[0].strip() if '^' in sample_id else sample_id
                         cursor.execute('SELECT id FROM patients WHERE sample_id = ?', (sample_id,))
                         result = cursor.fetchone()
                         if result:

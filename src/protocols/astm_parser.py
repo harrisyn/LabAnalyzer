@@ -415,13 +415,13 @@ class ASTMParser(BaseParser):
             
             # Extract patient ID
             if len(fields) > patient_id_pos and fields[patient_id_pos]:
-                message_info['patient_id'] = fields[patient_id_pos].strip()
+                message_info['patient_id'] = fields[patient_id_pos].split('^')[0].strip()
             
             # ... continue with existing logic for other fields ...
             # Code below is unchanged from original method except for variant awareness if needed
             # For now reuse existing flexible logic but allow variant to override if specific differences pop up.
             
-            sample_id_pos = self.field_positions["sample_id"]
+            sample_id_pos = self.field_positions["sample_id"].split('^')[0].strip()
             name_pos = self.field_positions["patient_name"]
             dob_pos = self.field_positions["date_of_birth"]
             sex_pos = self.field_positions["sex"]
@@ -429,7 +429,7 @@ class ASTMParser(BaseParser):
             
             # Extract sample ID
             if len(fields) > sample_id_pos and fields[sample_id_pos]:
-                message_info['sample_id'] = fields[sample_id_pos].strip()
+                message_info['sample_id'] = fields[sample_id_pos].split('^')[0].strip()
             # If sample ID is not available, use patient ID as fallback
             if not message_info['sample_id'] and message_info['patient_id']:
                 message_info['sample_id'] = message_info['patient_id']
@@ -686,7 +686,7 @@ class ASTMParser(BaseParser):
             # Format: "O|1|546 Y^3^5||^^^1.0000+301+1.0\..."
             # fields[0]=O, fields[1]=seq, fields[2]=sample_id, fields[3]=empty, fields[4]=test_list
             if len(fields) > 2 and fields[2]:
-                sample_id = fields[2].strip()
+                sample_id = fields[2].split('^')[0].strip()
                 # Skip if this is just a sequence number
                 if sample_id and not sample_id.isdigit():
                     message_info['patient_id'] = sample_id
@@ -724,7 +724,7 @@ class ASTMParser(BaseParser):
             # Fallback 2: Use same field position as in P records
             patient_id_pos = self.field_positions.get("patient_id", 2)
             if len(fields) > patient_id_pos and fields[patient_id_pos]:
-                patient_id = fields[patient_id_pos].strip()
+                patient_id = fields[patient_id_pos].split('^')[0].strip()
                 if patient_id and "1.0000+" not in patient_id:  # Not a test list
                     message_info['patient_id'] = patient_id
                     self.log_info(f"Extracted patient ID from O record position {patient_id_pos}: {patient_id}")
