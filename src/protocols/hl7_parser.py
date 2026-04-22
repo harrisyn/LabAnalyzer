@@ -78,7 +78,7 @@ class HL7Parser(BaseParser):
             
             if start_idx < end_idx:
                 # Extract the message without VT and FS markers
-                message = self.buffer[start_idx + 1:end_idx].decode('ascii', errors='replace')
+                message = self.buffer[start_idx + 1:end_idx].decode('latin-1', errors='replace')
                 
                 # Process the HL7 message
                 await self.process_message(message)
@@ -113,41 +113,58 @@ class HL7Parser(BaseParser):
         # Process each segment
         patient_info = {}
         results = []
-        
+        last_result_index = -1  # tracks which result the next NTE belongs to
+
         for segment in segments:
             if not segment:
                 continue
-                
+
             # Split segment into fields by |
             fields = segment.split('|')
-            
+
             if not fields or len(fields) < 2:
                 continue
-                
+
             segment_type = fields[0]
-            
+
             # Handle different segment types
             if segment_type == 'MSH':
                 self.log_info("Processing Message Header segment")
-                # Message header processing would go here
-                
+
             elif segment_type == 'PID':
                 self.log_info("Processing Patient ID segment")
                 patient_info = self._extract_patient_info(fields)
-                
+
             elif segment_type == 'OBR':
                 self.log_info("Processing Observation Request segment")
-                # Extract sample/specimen ID from OBR
                 order_info = self._extract_order_info(fields)
+                # Only store as sample_id, never overwrite patient_id with a specimen ID
                 if order_info.get('sample_id'):
                     patient_info['sample_id'] = order_info['sample_id']
-                
+
             elif segment_type == 'OBX':
                 self.log_info("Processing Observation Result segment")
                 result = self._extract_result(fields)
                 if result:
                     results.append(result)
+                    last_result_index = len(results) - 1
+
+            elif segment_type == 'NTE':
+                # Append note text to the most recent result's notes field
+                note_text = fields[3].strip() if len(fields) > 3 else ""
+                if note_text and last_result_index >= 0:
+                    existing = results[last_result_index].get('notes', '')
+                    results[last_result_index]['notes'] = (existing + ' ' + note_text).strip()
+                    self.log_info(f"Attached NTE note to result {last_result_index}: {note_text}")
                 
+        # If patient_id is still empty after PID processing, log a warning rather than
+        # silently substituting the OBR specimen ID — that would merge different patients.
+        if not patient_info.get('patient_id') and patient_info.get('sample_id'):
+            self.log_warning(
+                f"No patient_id found in PID segment; sample_id={patient_info['sample_id']} "
+                "will be stored without a patient link"
+            )
+
         # Store patient in database if we have patient info
         if patient_info.get('patient_id'):
             full_payload = '\n'.join(self.full_message_payload)
@@ -338,13 +355,18 @@ class HL7Parser(BaseParser):
             unit = fields[6] if len(fields) > 6 else ""
             raw_flags = fields[8] if len(fields) > 8 else ""
             
-            # Parse HL7 flags: N=Normal, H=High, L=Low, etc.
-            # HL7 uses single character flags, so just take the first character if present
-            flags = raw_flags.strip().upper() if raw_flags else "N"
-            # Ensure we only store single character or known values
-            if flags and flags[0] in ['N', 'H', 'L', 'C', 'F']:
-                flags = flags[0]
-            elif not flags:
+            # HL7 OBX-8 abnormal flags: preserve recognized single and multi-char codes.
+            # Common values: N=Normal, H=High, L=Low, C=Critical, HH=Critically High,
+            # LL=Critically Low, A=Abnormal, AA=Critically Abnormal, R=Result modified,
+            # S=Specimen error, W=Worst-case, U=Significant change up, D=Significant change down.
+            HL7_KNOWN_FLAGS = {'N', 'H', 'L', 'C', 'HH', 'LL', 'A', 'AA', 'R', 'S', 'W', 'U', 'D', 'B', 'I', 'F'}
+            flags_raw = raw_flags.strip().upper() if raw_flags else ""
+            if flags_raw in HL7_KNOWN_FLAGS:
+                flags = flags_raw
+            elif flags_raw:
+                # Unknown value — keep it as-is so no clinical information is lost
+                flags = flags_raw
+            else:
                 flags = "N"
             
             # Try to convert value to float for storage

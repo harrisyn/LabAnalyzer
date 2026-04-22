@@ -62,6 +62,8 @@ class ASTMParser(BaseParser):
         self.collecting_message = False
         self.full_raw_payload = ""
         self.message_counter = 0
+        self.record_buffer = ""      # accumulates ETB (multi-frame) record chunks
+        self.expected_frame_number = 1  # ASTM frames cycle 1→7→0→1
         
         # Initialize the scattergram decoder if needed
         self.scattergram_decoder = ScattergramDecoder(logger)
@@ -165,55 +167,92 @@ class ASTMParser(BaseParser):
             
             # Handle ASTM control characters
             if data == self.ENQ:
-                # Analyzer is initiating communication
                 self.log_info("Received ENQ (Enquiry)")
                 self.collecting_message = True
                 self.current_message_frames = []
-                return self.ACK  # Respond with ACK
-                
+                self.record_buffer = ""
+                self.expected_frame_number = 1
+                return self.ACK
+
             elif data == self.EOT:
-                # End of transmission - process the complete message
                 self.log_info("Received EOT (End of Transmission)")
-                
+
                 if self.collecting_message and self.current_message_frames:
-                    # Process the complete message
                     self._process_complete_message()
-                    
-                # Reset collection state
+
                 self.collecting_message = False
                 self.current_message_frames = []
-                return None  # No response needed
+                self.record_buffer = ""
+                self.expected_frame_number = 1
+                return None
             
-            # Handle ASTM framed data (STX...ETX)
+            # Handle ASTM framed data (STX...ETX/ETB)
             if data.startswith(self.STX) and (self.ETX in data or self.ETB in data):
                 try:
-                    # Find the position of the end marker
-                    end_marker = self.ETX if self.ETX in data else self.ETB
+                    # Determine end marker: ETB = intermediate frame, ETX = final frame
+                    has_etb = self.ETB in data
+                    has_etx = self.ETX in data
+                    if has_etb and has_etx:
+                        is_etb = data.index(self.ETB) < data.index(self.ETX)
+                    else:
+                        is_etb = has_etb
+                    end_marker = self.ETB if is_etb else self.ETX
                     end_pos = data.index(end_marker)
-                    
-                    # Extract frame content between STX and ETX/ETB
-                    frame_content = data[1:end_pos].decode('ascii', errors='replace')
-                    
+
+                    # Validate checksum: additive sum of bytes from frame-number through
+                    # end-marker (inclusive), mod 256, compared to 2 hex bytes after marker
+                    if len(data) >= end_pos + 3:
+                        computed = sum(data[1:end_pos + 1]) % 256
+                        try:
+                            received_cs = int(data[end_pos + 1:end_pos + 3], 16)
+                            if computed != received_cs:
+                                self.log_warning(
+                                    f"ASTM checksum mismatch: computed {computed:02X}, "
+                                    f"received {data[end_pos+1:end_pos+3].decode('ascii', errors='replace')}"
+                                )
+                        except ValueError:
+                            self.log_warning(f"Could not parse ASTM checksum: {data[end_pos+1:end_pos+3]!r}")
+
+                    # Decode using Latin-1 (ISO-8859-1) — required for accented patient names
+                    frame_content = data[1:end_pos].decode('latin-1', errors='replace')
+
+                    # Validate and advance frame sequence number (cycles 1→7→0→1)
+                    if frame_content and frame_content[0].isdigit():
+                        received_fn = int(frame_content[0])
+                        if received_fn != self.expected_frame_number:
+                            self.log_warning(
+                                f"ASTM frame sequence mismatch: expected {self.expected_frame_number}, got {received_fn}"
+                            )
+                        self.expected_frame_number = (received_fn + 1) % 8
+
                     # Log frame information
                     record_type = "Unknown"
                     if len(frame_content) >= 2:
                         record_type_char = frame_content[1] if frame_content[0].isdigit() else frame_content[0]
                         if record_type_char in self.RECORD_TYPES:
                             record_type = self.RECORD_TYPES.get(record_type_char, "Unknown")
-                    
-                    self.log_info(f"Received ASTM {record_type} frame - sending immediate ACK")
+
+                    self.log_info(f"Received ASTM {record_type} frame ({'ETB' if is_etb else 'ETX'}) - sending ACK")
                     self.log_info(f"Frame content: {frame_content}")
-                    
-                    # If collecting a message, add this frame
+
                     if self.collecting_message:
-                        self.current_message_frames.append(frame_content)
-                        
+                        # Strip the leading frame-number digit to get the raw record data
+                        record_data = frame_content[1:] if frame_content and frame_content[0].isdigit() else frame_content
+
+                        if is_etb:
+                            # Intermediate frame: accumulate; do NOT add to frames yet
+                            self.record_buffer += record_data
+                        else:
+                            # Final frame (ETX): combine buffered ETB chunks and append
+                            complete_record = self.record_buffer + record_data
+                            self.record_buffer = ""
+                            self.current_message_frames.append(complete_record)
+
                     # Always ACK the frame
                     return self.ACK
-                    
+
                 except Exception as e:
                     self.log_error(f"Error processing ASTM frame: {e}")
-                    # Send NAK on error
                     return self.NAK
             
             # Return None if no specific response is needed
@@ -251,7 +290,6 @@ class ASTMParser(BaseParser):
                 target=self._background_process_message,
                 args=(message_info,)
             )
-            processing_thread.daemon = True
             processing_thread.start()
             
             return True
@@ -524,6 +562,7 @@ class ASTMParser(BaseParser):
                 'test_code': None,
                 'value': None,
                 'unit': None,
+                'ref_range': None,
                 'flags': None,
                 'sequence': fields[seq_pos] if len(fields) > seq_pos else "0"
             }
@@ -596,7 +635,17 @@ class ASTMParser(BaseParser):
                 raw_unit = fields[unit_pos].strip()
                 # Apply unit normalization
                 result['unit'] = UNIT_NORMALIZATION.get(raw_unit, raw_unit)
-            
+
+            # Extract reference range from field 5 (format: low^high)
+            ref_range_pos = 5
+            if len(fields) > ref_range_pos and fields[ref_range_pos].strip():
+                ref_raw = fields[ref_range_pos].strip()
+                ref_parts = ref_raw.split('^')
+                if len(ref_parts) >= 2 and (ref_parts[0] or ref_parts[1]):
+                    result['ref_range'] = f"{ref_parts[0]}-{ref_parts[1]}"
+                else:
+                    result['ref_range'] = ref_raw
+
             if len(fields) > flag_pos:
                 raw_flags = fields[flag_pos].strip()
                 # Parse the flags to get normalized format (N, H, L, C, F, NR)
@@ -759,7 +808,8 @@ class ASTMParser(BaseParser):
                         result['unit'],
                         result['flags'],
                         None,  # Use default timestamp
-                        result['sequence']
+                        result['sequence'],
+                        result.get('ref_range')
                     )
                     
                     if result_id:
