@@ -1,256 +1,133 @@
-name: Release Build
+name: Release
 
+# Push a tag like v2.0.0 (or run manually with a version) to build the Windows
+# installer and the macOS disk image and publish them with a SHA256SUMS file.
+# The in-app updater refuses any download that is not listed in SHA256SUMS.
 on:
-  release:
-    types: [created]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version number (e.g. 1.0.0)'
+        description: "Version to build, e.g. 2.0.1"
         required: true
-        default: '1.0.0'
 
 permissions:
   contents: write
-  packages: write
-  pull-requests: read
-  issues: read
-  actions: read
 
 jobs:
-  create-release:
+  version:
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
     outputs:
-      tag_name: v${{ github.event.inputs.version }}
-      version: ${{ github.event.inputs.version }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
+          if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$ ]]; then echo "bad version: $V"; exit 1; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  test:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
         with:
-          tag_name: v${{ github.event.inputs.version }}
-          name: Release v${{ github.event.inputs.version }}
-          body: |
-            Release version ${{ github.event.inputs.version }}
-            
-            ## Changes
-            - Built from commit ${{ github.sha }}
-            
-            ## Downloads
-            - Windows Installer: LabSync-Setup-${{ github.event.inputs.version }}.exe
-            - macOS Package: LabSync-${{ github.event.inputs.version }}.dmg
-          draft: false
-          prerelease: false
+          python-version: "3.12"
+      - run: pip install -e ".[dev]" && ruff check src tests && pytest -q
+        env:
+          LABSYNC_NO_KEYRING: "1"
 
-  set-release-info:
-    runs-on: ubuntu-latest
-    needs: [create-release]
-    if: always() && github.event_name == 'workflow_dispatch'
-    outputs:
-      version: ${{ needs.create-release.outputs.version }}
-      tag_name: ${{ needs.create-release.outputs.tag_name }}
-    steps:
-      - name: No-op step
-        run: echo "Setting release info from create-release job"
-
-  set-tag-from-event:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release'
-    outputs:
-      version: ${{ steps.extract.outputs.version }}
-      tag_name: ${{ steps.extract.outputs.tag_name }}
-    steps:
-      - id: extract
-        name: Extract tag information
-        run: |
-          TAG="${{ github.ref_name }}"
-          VERSION="${TAG#v}"
-          echo "tag_name=$TAG" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Extracted tag=$TAG, version=$VERSION"
-
-  build-windows:
-    runs-on: windows-latest
-    needs: [set-release-info, set-tag-from-event]
-    if: always() && (needs.set-tag-from-event.result == 'success' || needs.set-release-info.result == 'success')
+  build:
+    needs: [version, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: windows
+          - os: macos-latest
+            artifact: macos
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set Version
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Stamp version
+        shell: bash
+        run: printf '__version__ = "%s"\n' "$VERSION" > src/labsync/_version.py
+      - name: Install
+        run: pip install . pyinstaller
+      - name: Freeze
+        run: pyinstaller packaging/labsync.spec --noconfirm
+      - name: Smoke test
+        shell: bash
         run: |
-          if ("${{ github.event_name }}" -eq "release") {
-            $VERSION="${{ needs.set-tag-from-event.outputs.version }}"
-            $TAG="${{ needs.set-tag-from-event.outputs.tag_name }}"
-          } else {
-            $VERSION="${{ needs.set-release-info.outputs.version }}"
-            $TAG="${{ needs.set-release-info.outputs.tag_name }}"
+          if [ "$RUNNER_OS" = "Windows" ]; then CLI=dist/LabSync/labsync-cli.exe; else CLI=dist/LabSync.app/Contents/MacOS/labsync-cli; fi
+          "$CLI" --version
+          "$CLI" profiles > /dev/null
+
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+            $env:PATH += ";${env:ProgramFiles(x86)}\Inno Setup 6"
           }
-          echo "APP_VERSION=$VERSION" >> $env:GITHUB_ENV
-          echo "TAG_NAME=$TAG" >> $env:GITHUB_ENV
-          echo "Version set to: $VERSION"
-          echo "Tag name set to: $TAG"
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+          iscc /DAppVersion=$env:VERSION packaging\windows\installer.iss
+          if (-not (Test-Path "dist\LabSync-Setup-$env:VERSION.exe")) { throw "installer missing" }
 
-      - name: Inject version into package
-        run: |
-          echo "__version__ = '$env:APP_VERSION'" > src/version.py
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller pillow
-
-      - name: Build Windows executable
-        run: |
-          $env:PYTHONPATH = "$PWD"
-          pyinstaller --name "LabSync" `
-            --windowed `
-            --onefile `
-            --add-data "src/gui/resources;gui/resources" `
-            --paths "." `
-            --hidden-import src.utils `
-            --hidden-import src.database `
-            --hidden-import src.network `
-            --hidden-import src.gui `
-            --hidden-import src.protocols `
-            --icon "src/gui/resources/icon.ico" `
-            src/main.py
-
-      - name: Create Windows Installer
-        run: |
-          choco install innosetup -y
-          echo "Running Inno Setup Compiler with version: $env:APP_VERSION"
-          iscc "/DAppVersion=$env:APP_VERSION" "installer/windows/installer.iss"
-          echo "Contents of dist after Inno Setup:"
-          Get-ChildItem -Path dist -Recurse | Format-Table FullName
-          
-      - name: Upload Installer Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer
-          path: dist/LabSync-Setup-${{ env.APP_VERSION }}.exe
-
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+      - name: macOS disk image
+        if: runner.os == 'macOS'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.TAG_NAME }}
-          files: ./dist/LabSync-Setup-${{ env.APP_VERSION }}.exe
-
-  build-macos:
-    runs-on: macos-latest
-    needs: [set-release-info, set-tag-from-event]
-    if: always() && (needs.set-tag-from-event.result == 'success' || needs.set-release-info.result == 'success')
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set Version
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${{ needs.set-tag-from-event.outputs.version }}"
-            TAG="${{ needs.set-tag-from-event.outputs.tag_name }}"
+          if [ -n "$MACOS_CERTIFICATE_P12" ]; then
+            KC="$RUNNER_TEMP/build.keychain"; KP="$(uuidgen)"
+            echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security create-keychain -p "$KP" "$KC"
+            security set-keychain-settings -lut 21600 "$KC"
+            security unlock-keychain -p "$KP" "$KC"
+            security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+            security set-key-partition-list -S apple-tool:,apple: -k "$KP" "$KC"
+            security list-keychains -d user -s "$KC"
           else
-            VERSION="${{ needs.set-release-info.outputs.version }}"
-            TAG="${{ needs.set-release-info.outputs.tag_name }}"
+            unset MACOS_SIGN_IDENTITY
           fi
-          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "TAG_NAME=$TAG" >> $GITHUB_ENV
-          echo "Version set to: $VERSION"
-          echo "Tag name set to: $TAG"
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
+          packaging/macos/make_dmg.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v4
         with:
-          python-version: '3.10'
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/LabSync-Setup-*.exe
+            dist/LabSync-*.dmg
+          if-no-files-found: error
 
-      - name: Inject version into package
-        run: |
-          echo "__version__ = '$APP_VERSION'" > src/version.py
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Create icns file
-        run: |
-          mkdir icon.iconset
-          sips -s format png src/gui/resources/icon.png --out icon.iconset/icon_512x512.png
-          sips -s format png src/gui/resources/icon.png -z 256 256 --out icon.iconset/icon_256x256.png
-          sips -s format png src/gui/resources/icon.png -z 128 128 --out icon.iconset/icon_128x128.png
-          iconutil -c icns icon.iconset -o LabSync.icns
-
-      - name: Build macOS app
-        run: |
-          pyinstaller --name "LabSync" --windowed --onefile --add-data "src/gui/resources:gui/resources" --icon "LabSync.icns" src/main.py
-          
-      - name: Create DMG
-        run: |
-          if [ ! -d "dist/LabSync.app" ]; then
-            echo "Error: dist/LabSync.app not found!"
-            exit 1
-          fi
-          hdiutil create -srcfolder "dist/LabSync.app" -volname "LabSync" -fs HFS+ -format UDZO -size 100m "dist/LabSync-${{ env.APP_VERSION }}.dmg"
-
-      - name: Upload DMG Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-installer
-          path: dist/LabSync-${{ env.APP_VERSION }}.dmg
-
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ env.TAG_NAME }}
-          files: ./dist/LabSync-${{ env.APP_VERSION }}.dmg
-
-  create-update-info:
-    needs: [build-windows, build-macos, set-release-info, set-tag-from-event]
+  publish:
+    needs: [version, build]
     runs-on: ubuntu-latest
-    if: always() && (needs.set-tag-from-event.result == 'success' || needs.set-release-info.result == 'success')
     steps:
-      - name: Set Version
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${{ needs.set-tag-from-event.outputs.version }}"
-            TAG="${{ needs.set-tag-from-event.outputs.tag_name }}"
-          else
-            VERSION="${{ needs.set-release-info.outputs.version }}"
-            TAG="${{ needs.set-release-info.outputs.tag_name }}"
-          fi
-          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "TAG_NAME=$TAG" >> $GITHUB_ENV
-          
-      - name: Create update config
-        run: |
-          cat > update_config.json << EOL
-          {
-            "latest_version": "${{ env.APP_VERSION }}",
-            "download_url": "https://github.com/${{ github.repository }}/releases/tag/${{ env.TAG_NAME }}",
-            "windows_url": "https://github.com/${{ github.repository }}/releases/download/${{ env.TAG_NAME }}/LabSync-Setup-${{ env.APP_VERSION }}.exe",
-            "macos_url": "https://github.com/${{ github.repository }}/releases/download/${{ env.TAG_NAME }}/LabSync-${{ env.APP_VERSION }}.dmg",
-            "changelog_url": "https://github.com/${{ github.repository }}/releases/tag/${{ env.TAG_NAME }}"
-          }
-          EOL
-
-      - name: Upload update config
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
         with:
-          tag_name: ${{ env.TAG_NAME }}
-          files: ./update_config.json
+          path: out
+          merge-multiple: true
+      - name: Checksums
+        working-directory: out
+        run: sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: LabSync ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: out/*

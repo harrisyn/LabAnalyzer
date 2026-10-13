@@ -1,156 +1,229 @@
-# Medical Analyzer Interface
+# LabSync
 
-A comprehensive Python application for receiving and processing data from various medical laboratory analyzers using multiple protocols.
+LabSync connects laboratory analyzers to the systems that need their results.
+It listens to instruments over TCP/IP or RS-232, speaks their protocols
+(ASTM, HL7, POCT1-A and a few vendor formats), stores every transmission
+locally, and delivers results to your LIS, EMR or API with retries until the
+receiver confirms them.
 
-## Features
+It runs as a desktop app on Windows and macOS (and headless on any OS).
 
-- TCP/IP server for receiving analyzer data
-- Multiple protocol support:
-  - ASTM protocol (E1381/E1394)
-  - HL7 protocol
-  - LIS protocol
-  - POCT1-A protocol (XML-based)
-  - Various vendor-specific protocols
-- Multiple analyzer support:
-  - SYSMEX XN-L and other SYSMEX analyzers
-  - Mindray BS-430 and other Mindray analyzers
-  - HumaCount 5D hematology analyzer
-  - Roche Cobas chemistry and immunoassay analyzers
-  - Abbott ARCHITECT clinical chemistry analyzers
-  - Siemens Dimension clinical chemistry analyzers
-  - RESPONSE 920 chemistry analyzer
-- Scattergram decompression and visualization
-- Real-time data display in a user-friendly interface
-- External server synchronization with multiple authentication methods
-- SQLite database storage for results
-- GUI interface with live updates
-- Configurable settings with easy-to-use dialog
+![Results tab](docs/screenshot.png)
 
-## Requirements
+## What it does
 
-- Python 3.8 or higher
-- Tkinter (usually comes with Python)
-- Additional dependencies listed in requirements.txt
+- **Instruments**: one connection per analyzer, as a TCP server (analyzer connects in), a TCP client
+  (LabSync dials the analyzer) or a serial port. Each connection gets its own protocol session.
+- **Protocols**
+  - ASTM E1381 / LIS01-A2 link layer with checksums, ETB continuation frames, frame-number checks,
+    NAK/retransmit, timeouts and line contention, plus E1394 / LIS2-A2 records (H, P, O, R, C, Q, M, L).
+  - HL7 v2.x over MLLP: ORU^R01, OUL^R22, ACKs, encapsulated images (histograms, scattergrams), and
+    host queries (Mindray QRY^Q02 -> QCK^Q02 + DSR^Q03).
+  - POCT1-A2 XML device conversations (HEL, DST, OBS, EOT, ACK, REQ, END) for point-of-care managers.
+  - Beckman Coulter AU online format and Siemens Dimension host interface (experimental).
+  - Generic text capture with regular-expression extraction for anything else.
+- **Host queries / worklists**: when an analyzer asks for a sample's orders, LabSync looks them up from your
+  order service and answers in the analyzer's protocol.
+- **Delivery** to any number of destinations, each with its own schedule (real time, every N minutes, or cron)
+  and filters (which instruments, QC included or not):
+  - HTTP/REST with JSON (LabSync schema, or the 1.x payload for existing integrations), API key, bearer,
+    basic or OAuth2 client-credentials authentication.
+  - FHIR R4 (transaction Bundle of Patient, Specimen, Observation and DiagnosticReport).
+  - HL7 ORU^R01 to an LIS over MLLP.
+  - A folder (JSON, CSV, HL7 or FHIR files) for systems that poll a share.
+- **Reliable by design**: every message is written to a local SQLite database before it is acknowledged
+  onward. A transactional outbox retries with exponential backoff, survives restarts and network outages,
+  and parks permanently rejected items for review and one-click resend.
+- **Secure defaults**: TLS is verified against the operating system's trust store (hospital CAs work),
+  credentials live in the OS credential store (Windows Credential Manager / macOS Keychain), the config file
+  is private to the user, XML is parsed with entity expansion disabled, and analyzers can be restricted to
+  an IP allow-list.
+- **Operations**: live instrument status, results browser with search, delivery queue with retry, raw message
+  viewer (text and hex), rolling logs, single-instance guard, tray icon on Windows, auto-start, and a
+  checksum-verified updater.
 
-## Installation
+See [docs/DEVICES.md](docs/DEVICES.md) for the instrument catalog (about 50 profiles across Sysmex, Mindray,
+Roche, Abbott, Siemens, Beckman Coulter, QuidelOrtho, HORIBA, Snibe, Bio-Rad, Tosoh, Stago, Werfen,
+Radiometer, Nova, Cepheid, HUMAN, DiaSys and Erba) and how to commission a new one.
 
-1. Clone this repository
-2. Create a virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Install the package in development mode:
-   ```bash
-   pip install -e .
-   ```
+## Install
 
-## Usage
+Download the latest release from the [Releases page](https://github.com/harrisyn/LabAnalyzer/releases):
 
-1. Start the application:
-   ```bash
-   python src/main.py
-   ```
+- **Windows 10/11**: `LabSync-Setup-<version>.exe`. The installer can add a firewall rule for analyzers on
+  the local network and start LabSync at sign-in. It upgrades 1.x installs in place.
+- **macOS 11+ (Apple silicon)**: `LabSync-<version>.dmg`, drag LabSync to Applications.
 
-2. Click "Start Server" to begin listening for analyzer connections
+Each release carries a `SHA256SUMS` file; the built-in updater refuses downloads that do not match it.
 
-3. The application will:
-   - Listen for analyzer connections on the configured port (default: 5000)
-   - Display received results in real-time
-   - Show scattergrams when available
-   - Sync data to external server if configured
-
-## Supported Analyzers
-
-### SYSMEX XN-L Hematology Analyzer
-- Uses ASTM protocol
-- Full support for CBC results and scattergrams
-- Capable of processing patient demographic information
-
-### Mindray BS-430 Chemistry Analyzer
-- Uses HL7 protocol
-- Supports chemistry panel results and QC data
-
-### HumaCount 5D Hematology Analyzer
-- Uses LIS protocol (proprietary)
-- Supports CBC results
-
-### Roche Cobas Chemistry/Immunoassay Analyzers
-- Uses ASTM protocol with Roche extensions
-- Supports various models including c311, c501, c502, e411, e601, e602
-- Full support for chemistry and immunoassay results
-
-### Abbott ARCHITECT Clinical Chemistry Analyzers
-- Uses POCT1-A protocol (XML-based)
-- Supports various models including c4000, c8000, i1000, i2000
-- Full support for chemistry and immunoassay results
-
-### Siemens Dimension Clinical Chemistry Analyzers
-- Uses ASTM protocol with Siemens extensions
-- Supports Dimension EXL, RxL, Xpand, and Vista systems
-- Full support for chemistry and immunoassay results
-
-### RESPONSE 920 Chemistry Analyzer
-- Uses custom proprietary protocol
-- Basic result support
-
-## Testing
-
-To test the application without a real analyzer, use the provided simulators:
+### From source
 
 ```bash
-# For ASTM protocol test (SYSMEX, etc.)
-python tests/test_analyzer.py
-
-# For general protocol testing
-python tests/test_core.py
+python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+labsync                    # GUI
+labsync-cli --headless     # service mode, logs to the data folder
 ```
 
-These simulators will generate sample data and send it to the application.
+Python 3.11+ with Tk is required for the GUI.
 
-## External Server Synchronization
+## Using it
 
-The application can synchronize data with external servers using:
-- Real-time synchronization (as results arrive)
-- Scheduled synchronization (at specific times)
-- Cron-based synchronization (using cron expressions)
+1. **Instruments -> Add**: pick the analyzer model, choose how it connects, and note the port.
+2. Configure the analyzer's LIS/host interface to send to this PC's IP and that port.
+3. **Destinations -> Add**: choose REST, FHIR, HL7 or folder, enter the URL and credentials, press **Test**.
+4. Results appear on the **Results** tab as they arrive; **Delivery** shows what is queued, sent or failed.
 
-Authentication methods supported:
-- API Key
-- Bearer Token
-- Basic Authentication
-- Custom Headers
-- OAuth 2.0
+### Data folder
 
-## Configuration
+| OS | Location |
+|---|---|
+| Windows | `%LOCALAPPDATA%\LabSync` |
+| macOS | `~/Library/Application Support/LabSync` |
+| Linux | `~/.local/share/labsync` |
 
-Edit `config.json` or use the GUI configuration dialog to customize:
-- Port number
-- Analyzer type and protocol
-- Application name and instance ID
-- External server settings
-- Sync frequency and authentication
+Override with `--home <folder>` or `LABSYNC_HOME`. It holds `config.json`, `data/labsync.db`, `logs/` and
+`exports/`.
 
-## Directory Structure
+### Command line
 
-```
-labSync/
-├── src/
-│   ├── database/      # Database management
-│   ├── gui/           # GUI components
-│   ├── network/       # Network and sync functionality
-│   ├── protocols/     # Protocol parsers for different analyzers
-│   └── utils/         # Utilities for configuration and logging
-├── tests/             # Test scripts and simulators
-├── logs/              # Application logs
-├── config.json        # Configuration file
-└── requirements.txt   # Dependencies
+```text
+labsync-cli --headless                       run without the GUI (for a service / server)
+labsync-cli profiles [--markdown]            list instrument profiles
+labsync-cli parse capture.bin --profile sysmex_xn_l [--options '{"checksum":"lenient"}']
+                                             parse a byte capture offline and print JSON
+labsync-cli check-config                     validate the configuration
+labsync-sim astm|hl7|poct1a --port 5000      simulate an analyzer (for demos and commissioning)
+labsync-sim astm --query S123                send a host query and print the reply
+labsync-sim replay capture.bin --port 5000   replay real analyzer bytes
 ```
 
-## License
+## Integrating with LabSync
 
-MIT License
+### Result payload (`payload_format: "labsync"`)
+
+Each report is POSTed as one JSON document. `Idempotency-Key` and `X-LabSync-Report-Id` carry the report `id`,
+which stays the same on every retry and resend, so the receiver can de-duplicate.
+
+```json
+{
+  "schema": "labsync.result.v1",
+  "id": "5f0c1d2e3a4b4c5d9e8f7a6b5c4d3e2f",
+  "instance_id": "LABSYNC-LAB1",
+  "source": {
+    "app": "LabSync",
+    "version": "2.0.0"
+  },
+  "device": {
+    "id": "dev-1a2b3c4d",
+    "name": "Main hematology",
+    "profile": "sysmex_xn_l",
+    "vendor": "Sysmex",
+    "model": "XN-L (XN-330/350/450/550)",
+    "protocol": "astm"
+  },
+  "received_at": "2024-03-01T10:15:02+00:00",
+  "is_qc": false,
+  "patient": {
+    "id": "P10234",
+    "name": {
+      "family": "DOE",
+      "given": "JANE"
+    },
+    "full_name": "JANE DOE",
+    "birth_date": "1980-01-31",
+    "sex": "F"
+  },
+  "specimen": {
+    "id": "123456",
+    "instrument_specimen_id": "123456",
+    "requested_tests": [
+      "WBC",
+      "HGB"
+    ]
+  },
+  "results": [
+    {
+      "sequence": 1,
+      "code": "WBC",
+      "value": "11.2",
+      "numeric_value": 11.2,
+      "units": "10*3/uL",
+      "flags": [
+        "H"
+      ],
+      "abnormal": true,
+      "observed_at": "2024-03-01T10:15:00"
+    },
+    {
+      "sequence": 2,
+      "code": "HGB",
+      "value": "13.4",
+      "numeric_value": 13.4,
+      "units": "g/dL",
+      "flags": [
+        "N"
+      ],
+      "abnormal": false,
+      "observed_at": "2024-03-01T10:15:00"
+    }
+  ],
+  "comments": []
+}
+```
+
+Optional members: `patient.alternate_ids`, `patient.physician`, `patient.location`, `specimen.type`,
+`specimen.collected_at`, `specimen.priority`, `specimen.rack`, `specimen.position`, `results[].name`,
+`results[].reference_range`, `results[].status`, `results[].comments`, `qc` (for QC runs), and `attachments`
+(base64 images, when enabled on the destination).
+
+The receiver should answer 2xx once the result is stored. 408, 409, 423, 425, 429 and 5xx are retried with
+backoff; other 4xx responses park the item as failed for review.
+
+### Existing 1.x integrations (`payload_format: "legacy"`)
+
+Upgrading keeps the old `config.json` behaviour: the 1.x server settings become an HTTP destination using the
+exact 1.x JSON shape (`instance_id`, `analyzer_type`, `patient{...}`, `results[...]`). The original file is kept
+as `config.v1.backup.json`, and secrets move into the OS credential store.
+
+### Order lookup (host queries)
+
+Set **Settings -> Order source** to an HTTP URL. When an analyzer asks for a specimen's work, LabSync calls
+
+```text
+GET <url>?specimen_id=S123&device_id=dev-1a2b3c4d
+```
+
+and expects `404`, `[]`, or:
+
+```json
+{"orders": [{"specimen_id": "S123", "tests": ["WBC", "HGB"], "priority": "R", "specimen_type": "serum",
+             "patient": {"id": "P1", "family": "DOE", "given": "JANE", "birth_date": "1980-01-31", "sex": "F"}}]}
+```
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest -q            # protocol, storage, delivery and end-to-end tests
+ruff check src tests
+pyinstaller packaging/labsync.spec --noconfirm     # frozen app in dist/
+```
+
+Code map:
+
+| Path | Purpose |
+|---|---|
+| `src/labsync/protocols/` | Sans-I/O protocol handlers (ASTM, HL7, POCT1-A, vendor) producing a common `LabMessage` |
+| `src/labsync/devices/catalog.py` | Instrument profiles and their defaults |
+| `src/labsync/transport/` | TCP server/client and serial links; one handler per connection |
+| `src/labsync/storage/` | SQLite store and outbox |
+| `src/labsync/outbound/` | Payload formats, senders, delivery workers, order lookup |
+| `src/labsync/engine.py` | Wires it together on a background asyncio loop |
+| `src/labsync/gui/` | Tkinter interface |
+| `packaging/`, `.github/workflows/` | PyInstaller spec, Windows installer, macOS DMG, CI and release |
+
+Releases: push a tag `vX.Y.Z`. The release workflow tests, builds both installers, and publishes them with
+`SHA256SUMS`. macOS signing and notarisation run when the `MACOS_*` / `APPLE_*` secrets are set.
+
+The 2.0 review and rewrite notes are in [docs/REVIEW.md](docs/REVIEW.md).
