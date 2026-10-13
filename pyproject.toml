@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labsync"
+dynamic = ["version"]
+description = "Laboratory instrument integration: connect to analyzers over ASTM, HL7, POCT1-A and vendor protocols, store results and deliver them to LIS/EMR endpoints."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Harrison Hammond", email = "harrisyn@gmail.com" }]
+keywords = ["laboratory", "LIS", "ASTM", "HL7", "POCT1-A", "medical devices", "analyzer", "middleware"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    "aiohttp>=3.9",
+    "croniter>=2.0",
+    "pyserial>=3.5",
+    "keyring>=24",
+    "defusedxml>=0.7",
+    "truststore>=0.9",
+    "pillow>=10",
+    "sv-ttk>=2.6",
+    "pystray>=0.19; sys_platform == 'win32' or sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5", "pyinstaller>=6.6"]
+
+[project.scripts]
+labsync-cli = "labsync.app:main"
+labsync-sim = "labsync.tools.simulator:main"
+
+[project.gui-scripts]
+labsync = "labsync.app:main"
+
+[project.urls]
+Homepage = "https://github.com/harrisyn/LabAnalyzer"
+
+[tool.setuptools.dynamic]
+version = { attr = "labsync._version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+labsync = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "SIM"]
+ignore = ["E501", "SIM105", "B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["labsync"]
+known-local-folder = ["conftest"]

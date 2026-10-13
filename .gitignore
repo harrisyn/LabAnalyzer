@@ -53,9 +53,15 @@ htmlcov/
 # Build and distribution
 dist/
 build/
-*.spec
 
 # Windows specific
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Local LabSync data (never commit configuration: it can hold credentials)
+config.json
+config.*.json
+*.db-wal
+*.db-shm
+.ruff_cache/
