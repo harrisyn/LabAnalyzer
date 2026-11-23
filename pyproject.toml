@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Harrison Hammond", email = "harrisyn@gmail.com" }]
-keywords = ["laboratory", "LIS", "ASTM", "HL7", "POCT1-A", "medical devices", "analyzer", "middleware"]
+keywords = ["laboratory", "LIS", "ASTM", "HL7", "POCT1-A", "DICOM", "medical devices", "analyzer", "middleware"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Healthcare Industry",
@@ -30,6 +30,9 @@ dependencies = [
     "defusedxml>=0.7",
     "truststore>=0.9",
     "pillow>=10",
+    "requests>=2.31",
+    "pydicom>=2.4,<3",
+    "pynetdicom>=2.1,<2.2",
     "sv-ttk>=2.6",
     "pystray>=0.19; sys_platform == 'win32' or sys_platform == 'linux'",
 ]

@@ -9,6 +9,7 @@ from tkinter import filedialog, ttk
 from typing import Any
 
 from ..models import Report, escape_control
+from . import theme
 from .common import PAD, center_on, local_ts, make_tree
 
 
@@ -56,12 +57,20 @@ def _raw_text_widget(parent: tk.Misc, raw: bytes) -> tk.Frame:
     return frame
 
 
+def _window_look(window: tk.Toplevel) -> None:
+    """Viewers aren't modal, but they still get their own edge so they never blend into the main window."""
+    window.configure(background=theme.color("bg"), highlightthickness=1,
+                     highlightbackground=theme.color("border"), highlightcolor=theme.color("accent"))
+    theme.window_chrome(window)
+
+
 class RawMessageWindow(tk.Toplevel):
     def __init__(self, parent: tk.Misc, title: str, raw: bytes):
         super().__init__(parent)
         self.title(title)
         self.geometry("900x560")
         _raw_text_widget(self, raw).pack(fill="both", expand=True, padx=PAD, pady=PAD)
+        _window_look(self)
         center_on(self, parent)
 
 
@@ -72,6 +81,7 @@ class ReportWindow(tk.Toplevel):
         self.title(f"Specimen {report.specimen.id or '—'}")
         self.geometry("980x640")
         self._images: list[Any] = []
+        _window_look(self)
         top = ttk.Frame(self, padding=PAD)
         top.pack(fill="x")
         p, s = report.patient, report.specimen

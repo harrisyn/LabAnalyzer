@@ -316,5 +316,17 @@ class FileSender(Sender):
 SENDERS: dict[str, type[Sender]] = {"http": HttpSender, "fhir": FhirSender, "hl7_mllp": MllpSender, "file": FileSender}
 
 
-def make_sender(dest: dict[str, Any]) -> Sender:
-    return SENDERS[dest.get("type", "http")](dest)
+def make_sender(dest: dict[str, Any], plugin_settings: dict[str, Any] | None = None) -> Sender:
+    """A sender for a built-in destination type, or one added by a plugin.
+
+    ``plugin_settings`` are the owning plugin's settings; the engine passes them in
+    (or puts them in ``dest["_plugin_settings"]``)."""
+    dest_type = dest.get("type", "http")
+    if dest_type in SENDERS:
+        return SENDERS[dest_type](dest)
+    from .. import plugins
+
+    for plugin in plugins.available().values():
+        if dest_type in plugin.lab_destination_types:
+            return plugin.make_sender(dest, plugin_settings or dest.get("_plugin_settings") or {})
+    raise DeliveryError(f"destination type {dest_type!r} needs a plugin that is not installed", retryable=True)

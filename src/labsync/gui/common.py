@@ -27,7 +27,7 @@ def make_tree(parent: tk.Misc, columns: list[tuple[str, str, int]], height: int 
     tree = ttk.Treeview(parent, columns=[c[0] for c in columns], show="headings", height=height,
                         selectmode=selectmode)
     for key, title, width in columns:
-        tree.heading(key, text=title, command=lambda k=key: sort_tree(tree, k, False))
+        tree.heading(key, text=title, anchor="w", command=lambda k=key: sort_tree(tree, k, False))
         tree.column(key, width=width, minwidth=40, stretch=width >= 150, anchor="w")
     ys = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
     xs = ttk.Scrollbar(parent, orient="horizontal", command=tree.xview)

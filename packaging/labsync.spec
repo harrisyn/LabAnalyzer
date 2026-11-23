@@ -16,6 +16,10 @@ datas = [(str(SRC / "labsync" / "resources"), "labsync/resources")]
 datas += collect_data_files("sv_ttk")
 
 hiddenimports = collect_submodules("keyring.backends") + ["labsync.tools.simulator"]
+# Imaging module (loaded lazily, so PyInstaller cannot see it): DICOM stack and its plugins
+hiddenimports += collect_submodules("labsync.imaging") + collect_submodules("labsync.plugins")
+hiddenimports += collect_submodules("pynetdicom") + collect_submodules("pydicom")
+datas += collect_data_files("pydicom") + collect_data_files("pynetdicom")
 if sys.platform == "win32":
     hiddenimports += ["pystray._win32", "win32timezone"]
 
@@ -65,6 +69,6 @@ if sys.platform == "darwin":
             "CFBundleVersion": __version__,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
-            "NSLocalNetworkUsageDescription": "LabSync listens for laboratory analyzers on the local network.",
+            "NSLocalNetworkUsageDescription": "LabSync listens for laboratory analyzers and imaging devices on the local network.",
         },
     )

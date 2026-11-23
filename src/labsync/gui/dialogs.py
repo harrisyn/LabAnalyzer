@@ -12,32 +12,61 @@ from typing import Any
 
 from croniter import croniter
 
-from ..config import AUTH_METHODS, new_destination, validate
+from .. import plugins
+from ..config import (
+    AUTH_METHODS,
+    DESTINATION_TYPES,
+    IMAGING_DESTINATION_TYPES,
+    default_imaging,
+    new_destination,
+    new_imaging_destination,
+    validate,
+    validate_imaging_destinations,
+)
 from ..devices.catalog import PROFILES, find_profile
 from ..protocols import PROTOCOL_LABELS
 from ..transport.runner import list_serial_ports
+from . import theme
 from .common import PAD, Form, center_on
+
+CORE_LAB_TYPES = {"http": "REST / JSON API", "fhir": "FHIR R4 server", "hl7_mllp": "LIS / HIS over HL7 (MLLP)",
+                  "file": "Folder (JSON, HL7, CSV or FHIR files)"}
+CORE_IMAGING_TYPES = {"dicom": "DICOM node (C-STORE)", "dicomweb": "DICOMweb server (STOW-RS)"}
 
 BAUD_RATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
 
 
 class _Dialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, title: str):
+        # Dim what's behind first, so the dialog stacks above the dimmed layer
+        self.scrim = theme.Scrim(parent)
         super().__init__(parent)
+        self.scrim.dialog = self
         self.title(title)
-        self.transient(parent.winfo_toplevel())
+        self.transient(self.scrim.owner())
         self.resizable(True, True)
         self.result: Any = None
-        self.body = ttk.Frame(self, padding=PAD * 2)
+        # A hairline in the accent colour and the title in the window itself: a dialog never blends
+        # into the window behind it, even where the title bar is plain
+        self.configure(highlightthickness=1, highlightbackground=theme.color("accent"),
+                       highlightcolor=theme.color("accent"))
+        head = ttk.Frame(self, padding=(PAD * 2, PAD * 2, PAD * 2, 0))
+        head.pack(fill="x")
+        ttk.Label(head, text=title, style="DialogTitle.TLabel").pack(side="left")
+        self.body = ttk.Frame(self, padding=(PAD * 2, PAD * 1.5, PAD * 2, PAD * 2))
         self.body.pack(fill="both", expand=True)
         self.buttons = ttk.Frame(self, padding=(PAD * 2, 0, PAD * 2, PAD * 2))
         self.buttons.pack(fill="x")
         self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Destroy>", lambda e: self.scrim.close() if e.widget is self else None, add="+")
 
     def finish_layout(self, ok_text: str = "Save") -> None:
         ttk.Button(self.buttons, text="Cancel", command=self.destroy).pack(side="right")
         ttk.Button(self.buttons, text=ok_text, style="Accent.TButton", command=self._ok).pack(side="right", padx=PAD)
+        self.configure(background=theme.color("bg"))
         center_on(self, self.master)
+        theme.window_chrome(self)
+        self.scrim.keep_below(self)
         self.grab_set()
         self.focus_set()
 
@@ -244,11 +273,19 @@ class DeviceDialog(_Dialog):
 
 class DestinationDialog(_Dialog):
     def __init__(self, parent: tk.Misc, dest: dict[str, Any], devices: list[dict[str, Any]], is_new: bool,
-                 tester: Callable[[dict[str, Any]], None]):
+                 tester: Callable[[dict[str, Any]], None], cfg: dict[str, Any] | None = None):
         super().__init__(parent, "Add destination" if is_new else f"Edit {dest.get('name', '')}")
         self.dest = copy.deepcopy(dest)
         self.devices = devices
         self.tester = tester
+        # Built-in types, plus those of plugins that are turned on (and this destination's own type)
+        self.types = dict(CORE_LAB_TYPES)
+        self.types.update(plugins.lab_destination_types(cfg or {}))
+        if self.dest.get("type") not in self.types:
+            owner = plugins.lab_destination_owner(cfg or {}, self.dest.get("type", ""), only_enabled=False)
+            self.types[self.dest.get("type", "http")] = owner[0].lab_destination_types[self.dest["type"]] \
+                if owner else self.dest.get("type", "http")
+        self.labels = {v: k for k, v in self.types.items()}
         nb = ttk.Notebook(self.body)
         nb.pack(fill="both", expand=True)
 
@@ -257,11 +294,13 @@ class DestinationDialog(_Dialog):
         nb.add(f, text="Destination")
         self.v_name = tk.StringVar(value=self.dest.get("name", ""))
         f.add("Name", ttk.Entry(f, textvariable=self.v_name, width=48))
-        self.v_type = tk.StringVar(value=self.dest.get("type", "http"))
-        types = ttk.Combobox(f, textvariable=self.v_type, state="readonly",
-                             values=["http", "fhir", "hl7_mllp", "file"], width=14)
+        self.v_type_label = tk.StringVar(value=self.types[self.dest.get("type", "http")])
+        types = ttk.Combobox(f, textvariable=self.v_type_label, state="readonly", values=list(self.types.values()),
+                             width=36)
         types.bind("<<ComboboxSelected>>", lambda e: self._type_changed())
-        f.add("Type", types, hint="http: REST/JSON API · fhir: FHIR R4 server · hl7_mllp: LIS/HIS over HL7 · file: drop folder")
+        f.add("Type", types)
+        self.l_plugin = ttk.Label(f, style="Hint.TLabel", wraplength=420, justify="left")
+        f.add("", self.l_plugin, key="plugin")
         self.v_enabled = tk.BooleanVar(value=self.dest.get("enabled", True))
         f.add("", ttk.Checkbutton(f, text="Enabled", variable=self.v_enabled))
 
@@ -379,8 +418,12 @@ class DestinationDialog(_Dialog):
         self._mode_changed()
         self.finish_layout()
 
+    def _type(self) -> str:
+        return self.labels.get(self.v_type_label.get(), "http")
+
     def _type_changed(self) -> None:
-        t = self.v_type.get()
+        t = self._type()
+        owner = None if t in DESTINATION_TYPES else plugins.lab_destination_owner({}, t, only_enabled=False)
         web = t in ("http", "fhir")
         for k in ("url", "verify", "ca", "headers"):
             self.f.show(k, web)
@@ -390,6 +433,10 @@ class DestinationDialog(_Dialog):
             self.f.show(k, t == "hl7_mllp")
         for k in ("folder", "ffmt"):
             self.f.show(k, t == "file")
+        self.f.show("plugin", owner is not None)
+        if owner is not None:
+            self.l_plugin.configure(text=f"Uses the {owner[0].name} connection set up under Settings > Integrations "
+                                         "(address and key); nothing else to fill in here.")
 
     def _auth_changed(self) -> None:
         m = self.v_auth.get()
@@ -419,7 +466,7 @@ class DestinationDialog(_Dialog):
 
     def collect(self) -> dict[str, Any]:
         d = self.dest
-        t = self.v_type.get()
+        t = self._type()
         if t != d.get("type"):
             fresh = new_destination(t)
             fresh["id"] = d["id"]
@@ -502,8 +549,10 @@ class SettingsDialog(_Dialog):
     def __init__(self, parent: tk.Misc, cfg: dict[str, Any], keyring_available: bool):
         super().__init__(parent, "Settings")
         self.cfg = copy.deepcopy(cfg)
-        f = Form(self.body)
-        f.pack(fill="both", expand=True)
+        nb = ttk.Notebook(self.body)
+        nb.pack(fill="both", expand=True)
+        f = Form(nb, padding=PAD * 1.5)
+        nb.add(f, text="General")
         self.v_app = tk.StringVar(value=cfg.get("app_name", "LabSync"))
         f.add("Window title", ttk.Entry(f, textvariable=self.v_app, width=40))
         self.v_inst = tk.StringVar(value=cfg.get("instance_id", ""))
@@ -519,16 +568,55 @@ class SettingsDialog(_Dialog):
                                   variable=self.v_tray))
         self.v_upd = tk.BooleanVar(value=cfg.get("check_updates", True))
         f.add("", ttk.Checkbutton(f, text="Check for updates daily", variable=self.v_upd))
-        self.v_theme = tk.StringVar(value=cfg.get("theme", "light"))
-        f.add("Theme", ttk.Combobox(f, textvariable=self.v_theme, values=["light", "dark", "system"],
-                                    state="readonly", width=10))
         self.v_level = tk.StringVar(value=cfg.get("log_level", "INFO"))
         f.add("Log level", ttk.Combobox(f, textvariable=self.v_level, values=["DEBUG", "INFO", "WARNING", "ERROR"],
                                         state="readonly", width=10))
         self.v_ret = tk.StringVar(value=str(cfg.get("retention_days", 0)))
         f.add("Keep data (days)", ttk.Entry(f, textvariable=self.v_ret, width=8),
               hint="0 keeps everything. Undelivered results are never purged.")
-        f.section("Order queries (instrument asks the host for a worklist)")
+
+        f = Form(nb, padding=PAD * 1.5)
+        nb.add(f, text="Appearance")
+        f.section("Theme")
+        self.v_theme = tk.StringVar(value=cfg.get("theme", "system"))
+        modes = ttk.Frame(f)
+        for value, text in (("system", "Match the system"), ("light", "Light"), ("dark", "Dark")):
+            ttk.Radiobutton(modes, text=text, value=value, variable=self.v_theme).pack(anchor="w", pady=2)
+        f.add("Mode", modes, hint="You can also switch from the sun / moon button at the bottom of the sidebar.")
+
+        # Integrations: each plugin can be turned on; its own options show only when it is on
+        f = Form(nb, padding=PAD * 1.5)
+        nb.add(f, text="Integrations")
+        self.integrations = f
+        ttk.Label(f, style="Hint.TLabel", wraplength=460, justify="left",
+                  text="LabSync works with any system through the destinations you add. Integrations add extras for a "
+                       "particular platform (pairing, status and settings managed there). Leave them off if you "
+                       "don't use that platform.").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, PAD))
+        f._row = 1
+        self.plugin_vars: dict[str, tk.BooleanVar] = {}
+        self.plugin_panels: dict[str, Any] = {}
+        available = plugins.available()
+        if not available:
+            f.add("", ttk.Label(f, text="No integrations are installed.", style="Hint.TLabel"))
+        for pid, plugin in sorted(available.items()):
+            settings = plugins.settings_for(cfg, pid)
+            f.section(plugin.name)
+            var = tk.BooleanVar(value=bool(settings.get("enabled")))
+            self.plugin_vars[pid] = var
+            f.add("", ttk.Checkbutton(f, text=f"Turn on {plugin.name}", variable=var,
+                                      command=lambda p=pid: self._plugin_toggled(p)), hint=plugin.summary)
+            try:
+                panel = plugin.settings_panel(f, settings)
+            except Exception:
+                panel = None
+            if panel is not None:
+                f.add("", panel, key=f"plugin:{pid}")
+                self.plugin_panels[pid] = panel
+            self._plugin_toggled(pid)
+
+        f = Form(nb, padding=PAD * 1.5)
+        nb.add(f, text="Order queries")
+        f.section("Instrument asks the host for a worklist")
         orders = cfg.get("orders") or {}
         self.v_oprov = tk.StringVar(value=orders.get("provider", "none"))
         f.add("Source", ttk.Combobox(f, textvariable=self.v_oprov, values=["none", "http"], state="readonly", width=8),
@@ -542,6 +630,10 @@ class SettingsDialog(_Dialog):
             ttk.Label(f, text="No OS credential store was found; secrets are kept in the config file (owner-only).",
                       style="Hint.TLabel").grid(row=99, column=0, columnspan=2, sticky="w", pady=(PAD, 0))
         self.finish_layout()
+
+    def _plugin_toggled(self, pid: str) -> None:
+        if pid in self.plugin_panels:
+            self.integrations.show(f"plugin:{pid}", bool(self.plugin_vars[pid].get()))
 
     def collect(self) -> dict[str, Any]:
         c = self.cfg
@@ -560,4 +652,337 @@ class SettingsDialog(_Dialog):
                        if self.v_okey.get() else {"method": "none"}}
         if c["orders"]["provider"] == "http" and not c["orders"]["url"].startswith(("http://", "https://")):
             raise ValueError("Order lookup URL must start with http:// or https://")
+        all_plugins = c.setdefault("plugins", {})
+        for pid, var in self.plugin_vars.items():
+            plugin = plugins.get(pid)
+            before = plugins.settings_for(c, pid)
+            settings = dict(before)
+            on = bool(var.get())
+            if on and pid in self.plugin_panels:
+                settings = self.plugin_panels[pid].collect()
+            settings["enabled"] = on
+            all_plugins[pid] = settings
+            # Newly set up: send images there too, as people expect after pairing
+            if on and plugin and plugin.configured(settings) and not (before.get("enabled") and
+                                                                      plugin.configured(before)):
+                img = c.setdefault("imaging", default_imaging())
+                dests = img.setdefault("destinations", [])
+                for dtype in plugin.imaging_destination_types:
+                    if not any(d.get("type") == dtype for d in dests):
+                        dests.append(new_imaging_destination(dtype))
+            if on:
+                problems = plugin.validate(settings) if plugin else []
+                if problems:
+                    raise ValueError("\n".join(problems))
         return c
+
+
+# ---------------------------------------------------------------------------
+# Imaging
+# ---------------------------------------------------------------------------
+
+
+def _parse_rows(text: str, fields: tuple[str, ...], required: int, what: str) -> list[dict[str, str]]:
+    rows = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < required or len(parts) > len(fields):
+            raise ValueError(f"{what}, line {n}: expected {', '.join(fields[:required])}"
+                             + (f" (optional {', '.join(fields[required:])})" if len(fields) > required else ""))
+        rows.append(dict(zip(fields, parts + [""] * (len(fields) - len(parts)), strict=True)))
+    return rows
+
+
+def imaging_destination_label(cfg: dict[str, Any], dtype: str) -> str:
+    if dtype in CORE_IMAGING_TYPES:
+        return CORE_IMAGING_TYPES[dtype]
+    owner = plugins.imaging_destination_owner(cfg, dtype, only_enabled=False)
+    return owner[0].imaging_destination_types[dtype] if owner else dtype
+
+
+class ImagingDialog(_Dialog):
+    """The imaging module: a DICOM node that imaging devices send to, and where images go next."""
+
+    def __init__(self, parent: tk.Misc, cfg: dict[str, Any]):
+        super().__init__(parent, "Imaging (DICOM) settings")
+        self.cfg = copy.deepcopy(cfg)
+        img = {**default_imaging(), **(cfg.get("imaging") or {})}
+        self.dests: list[dict[str, Any]] = copy.deepcopy(img.get("destinations") or [])
+        nb = ttk.Notebook(self.body)
+        nb.pack(fill="both", expand=True)
+        f = Form(nb, padding=PAD * 1.5)
+        nb.add(f, text="DICOM node")
+        self.v_on = tk.BooleanVar(value=bool(img.get("enabled")))
+        f.add("", ttk.Checkbutton(f, text="Receive images from imaging devices (CT, MRI, X-ray, ultrasound)",
+                                  variable=self.v_on))
+        f.section("This computer as a DICOM node")
+        self.v_ae = tk.StringVar(value=img.get("ae_title", "LABSYNC"))
+        f.add("AE title", ttk.Entry(f, textvariable=self.v_ae, width=18),
+              hint="What imaging devices send to (set the same AE title, this computer's address and the port "
+                   "on each device).")
+        self.v_port = tk.StringVar(value=str(img.get("port", 11113)))
+        f.add("Port", ttk.Entry(f, textvariable=self.v_port, width=8),
+              hint="11113 avoids 104 and 11112, which PACS and cloud PACS communicators often use.")
+        self.v_bind = tk.StringVar(value=img.get("bind_address", "0.0.0.0"))
+        f.add("Listen on", ttk.Entry(f, textvariable=self.v_bind, width=18),
+              hint="0.0.0.0 for every network card, or this computer's LAN address only.")
+
+        f = Form(nb, padding=PAD * 1.5)
+        nb.add(f, text="Devices")
+        f.section("Who may send")
+        self.v_any = tk.BooleanVar(value=bool(img.get("accept_unknown_nodes")))
+        f.add("", ttk.Checkbutton(f, text="Accept any device (not recommended)", variable=self.v_any))
+        self.t_nodes = tk.Text(f, height=5, width=56, font=theme.FONTS.get("mono", ("TkFixedFont", 9)),
+                               borderwidth=1, relief="solid", highlightthickness=0)
+        self.t_nodes.insert("1.0", "\n".join(f"{n.get('name', '')}, {n.get('ae_title', '')}, {n.get('ip', '')}".rstrip(", ")
+                                             for n in img.get("local_nodes") or []))
+        hint = "One per line: name, AE title, IP or range (optional)."
+        if any(p.make_link is not plugins.Plugin.make_link for p, _ in plugins.enabled(cfg)):
+            hint += " Devices managed by a turned-on integration are added automatically."
+        f.add("Allowed devices", self.t_nodes, hint=hint)
+
+        f = ttk.Frame(nb, padding=PAD * 1.5)
+        nb.add(f, text="Where images go")
+        ttk.Label(f, style="Hint.TLabel", wraplength=520, justify="left",
+                  text="Every image is kept on this computer until each destination has it. Add a PACS or any DICOM "
+                       "node (for example a cloud PACS communicator), or a DICOMweb server.").pack(anchor="w")
+        holder = ttk.Frame(f)
+        holder.pack(fill="both", expand=True, pady=PAD)
+        from .common import make_tree
+
+        self.t_dest = make_tree(holder, [("name", "Name", 170), ("type", "Type", 190), ("target", "Target", 230),
+                                         ("on", "On", 40)], height=5, selectmode="browse")
+        self.t_dest.bind("<Double-1>", lambda e: self._edit_dest())
+        bar = ttk.Frame(f)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="Add", style="Accent.TButton", command=self._add_dest).pack(side="left")
+        ttk.Button(bar, text="Edit", command=self._edit_dest).pack(side="left", padx=4)
+        ttk.Button(bar, text="Remove", command=self._remove_dest).pack(side="left")
+        self._fill_dests()
+
+        f = Form(nb, padding=PAD * 1.5)
+        nb.add(f, text="Disk")
+        self.v_keep = tk.StringVar(value=str(img.get("retention_days", 7)))
+        f.add("Keep delivered images (days)", ttk.Entry(f, textvariable=self.v_keep, width=8),
+              hint="Images not yet delivered everywhere are never deleted.")
+        self.v_free = tk.StringVar(value=str(img.get("min_free_disk_mb", 2048)))
+        f.add("Stop receiving below (MB free)", ttk.Entry(f, textvariable=self.v_free, width=8),
+              hint="Devices are told 'out of resources' and send again later.")
+        self.v_hold = tk.StringVar(value=str(img.get("hold_retry_days", 7)))
+        f.add("Keep retrying a held image (days)", ttk.Entry(f, textvariable=self.v_hold, width=8),
+              hint="When a destination says it isn't ready for an image yet (for example no matching order).")
+        self.finish_layout()
+
+    def _fill_dests(self) -> None:
+        self.t_dest.delete(*self.t_dest.get_children(""))
+        for d in self.dests:
+            dtype = d.get("type", "dicom")
+            if dtype == "dicom":
+                target = f"{d.get('ae_title')} @ {d.get('host')}:{d.get('port')}"
+            elif dtype == "dicomweb":
+                target = d.get("url", "")
+            else:
+                owner = plugins.imaging_destination_owner(self.cfg, dtype, only_enabled=False)
+                target = owner[0].describe_destination(d, owner[1]) if owner else ""
+                if owner and not plugins.is_enabled(self.cfg, owner[0].id):
+                    target += " (integration off)"
+            self.t_dest.insert("", "end", iid=d["id"], values=(d.get("name"), imaging_destination_label(self.cfg, dtype),
+                                                               target, "yes" if d.get("enabled", True) else "no"))
+
+    def _add_dest(self) -> None:
+        dlg = ImagingDestinationDialog(self, new_imaging_destination("dicom"), self.cfg, is_new=True,
+                                       taken={d["id"] for d in self.dests})
+        self.wait_window(dlg)
+        if dlg.result:
+            self.dests.append(dlg.result)
+            self._fill_dests()
+
+    def _edit_dest(self) -> None:
+        sel = self.t_dest.selection()
+        if not sel:
+            return
+        idx = next(i for i, d in enumerate(self.dests) if d["id"] == sel[0])
+        dlg = ImagingDestinationDialog(self, self.dests[idx], self.cfg, is_new=False,
+                                       taken={d["id"] for d in self.dests} - {sel[0]})
+        self.wait_window(dlg)
+        if dlg.result:
+            self.dests[idx] = dlg.result
+            self._fill_dests()
+
+    def _remove_dest(self) -> None:
+        sel = self.t_dest.selection()
+        if sel and messagebox.askyesno("Remove destination", "Stop sending images there? Images already queued for it "
+                                       "are no longer sent.", parent=self):
+            self.dests = [d for d in self.dests if d["id"] != sel[0]]
+            self._fill_dests()
+
+    def collect(self) -> dict[str, Any]:
+        c = self.cfg
+        img = {**default_imaging(), **(c.get("imaging") or {})}
+        try:
+            port = int(self.v_port.get())
+            keep, free, hold = float(self.v_keep.get()), int(self.v_free.get()), float(self.v_hold.get())
+        except ValueError as exc:
+            raise ValueError("Port, days and MB must be numbers.") from exc
+        nodes = _parse_rows(self.t_nodes.get("1.0", "end"), ("name", "ae_title", "ip"), 2, "Allowed devices")
+        for n in nodes:
+            n["ae_title"] = n["ae_title"].upper()
+        img.update(enabled=bool(self.v_on.get()), ae_title=self.v_ae.get().strip().upper(), port=port,
+                   bind_address=self.v_bind.get().strip() or "0.0.0.0", accept_unknown_nodes=bool(self.v_any.get()),
+                   local_nodes=nodes, destinations=self.dests, retention_days=keep, min_free_disk_mb=free,
+                   hold_retry_days=hold)
+        img.pop("send_to_serenity", None)
+        img.pop("dicom_destinations", None)
+        c["imaging"] = img
+        problems = [p for p in validate(c) if p.startswith("imaging")]
+        if problems:
+            raise ValueError("\n".join(problems))
+        if img["enabled"] and not any(d.get("enabled", True) for d in self.dests):
+            messagebox.showinfo("No destination yet",
+                                "Images will be kept on this computer until you add somewhere to send them "
+                                "('Where images go').", parent=self)
+        return c
+
+
+class ImagingDestinationDialog(_Dialog):
+    """One place images go: a DICOM node, a DICOMweb server, or a type added by an integration."""
+
+    def __init__(self, parent: tk.Misc, dest: dict[str, Any], cfg: dict[str, Any], is_new: bool, taken: set[str]):
+        super().__init__(parent, "Add imaging destination" if is_new else f"Edit {dest.get('name', '')}")
+        self.dest = copy.deepcopy(dest)
+        self.cfg = cfg
+        self.taken = taken
+        self.types = dict(CORE_IMAGING_TYPES)
+        self.types.update(plugins.imaging_destination_types(cfg))
+        if self.dest.get("type") not in self.types:
+            self.types[self.dest.get("type", "dicom")] = imaging_destination_label(cfg, self.dest.get("type", "dicom"))
+        self.labels = {v: k for k, v in self.types.items()}
+        f = Form(self.body)
+        f.pack(fill="both", expand=True)
+        self.f = f
+        self.v_type = tk.StringVar(value=self.types[self.dest.get("type", "dicom")])
+        cb = ttk.Combobox(f, textvariable=self.v_type, values=list(self.types.values()), state="readonly", width=34)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._type_changed())
+        f.add("Type", cb)
+        self.v_name = tk.StringVar(value=self.dest.get("name", ""))
+        f.add("Name", ttk.Entry(f, textvariable=self.v_name, width=40))
+        self.v_on = tk.BooleanVar(value=self.dest.get("enabled", True))
+        f.add("", ttk.Checkbutton(f, text="Send images here", variable=self.v_on))
+        self.l_plugin = ttk.Label(f, style="Hint.TLabel", wraplength=420, justify="left")
+        f.add("", self.l_plugin, key="plugin")
+        self.v_ae = tk.StringVar(value=self.dest.get("ae_title", ""))
+        f.add("AE title", ttk.Entry(f, textvariable=self.v_ae, width=18), key="ae",
+              hint="The receiving node's AE title. Add LabSync's AE title on that node as an allowed sender.")
+        self.v_host = tk.StringVar(value=self.dest.get("host", ""))
+        f.add("Host", ttk.Entry(f, textvariable=self.v_host), key="host")
+        self.v_port = tk.StringVar(value=str(self.dest.get("port", 104)))
+        f.add("Port", ttk.Entry(f, textvariable=self.v_port, width=8), key="port")
+        self.v_url = tk.StringVar(value=self.dest.get("url", ""))
+        f.add("DICOMweb URL", ttk.Entry(f, textvariable=self.v_url), key="url",
+              hint="The DICOMweb root, e.g. https://pacs.example.org/dicom-web (images are POSTed to …/studies).")
+        auth = self.dest.get("auth") or {"method": "none"}
+        self.v_auth = tk.StringVar(value=auth.get("method", "none"))
+        am = ttk.Combobox(f, textvariable=self.v_auth, values=["none", "basic", "bearer", "api_key"], state="readonly",
+                          width=10)
+        am.bind("<<ComboboxSelected>>", lambda e: self._type_changed())
+        f.add("Sign-in", am, key="auth")
+        self.v_user = tk.StringVar(value=auth.get("username", ""))
+        f.add("Username", ttk.Entry(f, textvariable=self.v_user), key="user")
+        self.v_pw = tk.StringVar(value=auth.get("password", ""))
+        f.add("Password", ttk.Entry(f, textvariable=self.v_pw, show="•"), key="pw")
+        self.v_tok = tk.StringVar(value=auth.get("token", ""))
+        f.add("Token", ttk.Entry(f, textvariable=self.v_tok, show="•"), key="tok")
+        self.v_akh = tk.StringVar(value=auth.get("header", "X-API-Key"))
+        f.add("Header name", ttk.Entry(f, textvariable=self.v_akh), key="akh")
+        self.v_ak = tk.StringVar(value=auth.get("api_key", ""))
+        f.add("API key", ttk.Entry(f, textvariable=self.v_ak, show="•"), key="ak")
+        self.v_verify = tk.BooleanVar(value=self.dest.get("verify_tls", True))
+        f.add("", ttk.Checkbutton(f, text="Verify TLS certificates", variable=self.v_verify), key="verify")
+        self.v_ca = tk.StringVar(value=self.dest.get("ca_bundle", ""))
+        f.add("Extra CA file", ttk.Entry(f, textvariable=self.v_ca), key="ca",
+              hint="Optional PEM file for a private certificate authority.")
+        ttk.Button(self.buttons, text="Test connection", command=self._test).pack(side="left")
+        self._type_changed()
+        self.finish_layout()
+
+    def _type(self) -> str:
+        return self.labels.get(self.v_type.get(), "dicom")
+
+    def _type_changed(self) -> None:
+        t = self._type()
+        for k in ("ae", "host", "port"):
+            self.f.show(k, t == "dicom")
+        web = t == "dicomweb"
+        for k in ("url", "auth", "verify", "ca"):
+            self.f.show(k, web)
+        m = self.v_auth.get()
+        for k, on in (("user", m == "basic"), ("pw", m == "basic"), ("tok", m == "bearer"), ("akh", m == "api_key"),
+                      ("ak", m == "api_key")):
+            self.f.show(k, web and on)
+        owner = None if t in CORE_IMAGING_TYPES else plugins.imaging_destination_owner(self.cfg, t, only_enabled=False)
+        self.f.show("plugin", owner is not None)
+        if owner is not None:
+            self.l_plugin.configure(text=f"Uses the {owner[0].name} connection set up under Settings > Integrations.")
+
+    def collect(self) -> dict[str, Any]:
+        t = self._type()
+        d = self.dest if t == self.dest.get("type") else {**new_imaging_destination(t), "id": self.dest["id"]}
+        if d["id"] in self.taken:
+            d["id"] = new_imaging_destination(t)["id"]
+        d.update(type=t, name=self.v_name.get().strip() or d.get("name") or self.types[t], enabled=bool(self.v_on.get()))
+        if t == "dicom":
+            try:
+                port = int(self.v_port.get())
+            except ValueError as exc:
+                raise ValueError("Port must be a number.") from exc
+            d.update(ae_title=self.v_ae.get().strip().upper(), host=self.v_host.get().strip(), port=port)
+        elif t == "dicomweb":
+            m = self.v_auth.get()
+            auth: dict[str, Any] = {"method": m}
+            if m == "basic":
+                auth.update(username=self.v_user.get(), password=self.v_pw.get())
+            elif m == "bearer":
+                auth["token"] = self.v_tok.get()
+            elif m == "api_key":
+                auth.update(header=self.v_akh.get().strip() or "X-API-Key", api_key=self.v_ak.get())
+            d.update(url=self.v_url.get().strip(), auth=auth, verify_tls=bool(self.v_verify.get()),
+                     ca_bundle=self.v_ca.get().strip())
+        problems = validate_imaging_destinations({}, [d])
+        if problems:
+            raise ValueError("\n".join(p.replace("imaging: ", "") for p in problems))
+        return d
+
+    def _test(self) -> None:
+        try:
+            d = self.collect()
+        except ValueError as exc:
+            messagebox.showerror("Check the form", str(exc), parent=self)
+            return
+        import threading
+
+        from ..imaging.destinations import make_destination
+
+        cfg = self.cfg
+
+        class _View:
+            def get(self, key: str) -> Any:
+                return {**default_imaging(), **(cfg.get("imaging") or {})}.get(key)
+
+        def work() -> None:
+            try:
+                dest = make_destination(d, _View(), lambda t: plugins.imaging_destination_owner(cfg, t, False))
+                if dest is None or not hasattr(dest, "test"):
+                    msg, ok = "Saved settings are used when sending; there is no separate test for this type.", True
+                else:
+                    msg, ok = dest.test(), True
+            except Exception as exc:
+                msg, ok = str(exc) or exc.__class__.__name__, False
+            self.after(0, lambda: (messagebox.showinfo if ok else messagebox.showerror)(
+                "Connection test", msg, parent=self))
+
+        threading.Thread(target=work, daemon=True).start()
+
+
+__all__ = ["IMAGING_DESTINATION_TYPES", "DestinationDialog", "DeviceDialog", "ImagingDialog", "SettingsDialog"]

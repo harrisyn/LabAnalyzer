@@ -8,7 +8,7 @@ receiver confirms them.
 
 It runs as a desktop app on Windows and macOS (and headless on any OS).
 
-![Results tab](docs/screenshot.png)
+![LabSync, light mode](docs/screenshot.png)
 
 ## What it does
 
@@ -41,6 +41,16 @@ It runs as a desktop app on Windows and macOS (and headless on any OS).
 - **Operations**: live instrument status, results browser with search, delivery queue with retry, raw message
   viewer (text and hex), rolling logs, single-instance guard, tray icon on Windows, auto-start, and a
   checksum-verified updater.
+- **Imaging (DICOM)**: an optional DICOM storage node for CT, MRI, X-ray and ultrasound devices. Every image is
+  written to disk before the device is told "Success", then sent to each destination you choose (a PACS or any
+  DICOM node, a cloud PACS communicator, a DICOMweb server), retrying until it arrives.
+  See [docs/IMAGING.md](docs/IMAGING.md).
+- **Integrations (plugins)**: optional extras for a particular platform, such as pairing with a code, a status
+  heartbeat and imaging devices managed on the platform's side. They stay hidden until turned on under
+  **Settings > Integrations**. A Serenity plugin is included; others can be added as Python packages.
+  See [docs/PLUGINS.md](docs/PLUGINS.md).
+- **Modern desktop app**: sidebar navigation, status cards, light and dark mode (or follow the system), and on
+  Windows 11 a title bar that matches the theme.
 
 See [docs/DEVICES.md](docs/DEVICES.md) for the instrument catalog (about 50 profiles across Sysmex, Mindray,
 Roche, Abbott, Siemens, Beckman Coulter, QuidelOrtho, HORIBA, Snibe, Bio-Rad, Tosoh, Stago, Werfen,
@@ -69,10 +79,28 @@ Python 3.11+ with Tk is required for the GUI.
 
 ## Using it
 
-1. **Instruments -> Add**: pick the analyzer model, choose how it connects, and note the port.
+1. **Instruments > Add instrument**: pick the analyzer model, choose how it connects, and note the port.
 2. Configure the analyzer's LIS/host interface to send to this PC's IP and that port.
-3. **Destinations -> Add**: choose REST, FHIR, HL7 or folder, enter the URL and credentials, press **Test**.
-4. Results appear on the **Results** tab as they arrive; **Delivery** shows what is queued, sent or failed.
+3. **Delivery > Add destination**: choose REST, FHIR, HL7 or folder, enter the URL and credentials, press **Test**.
+4. Results appear on the **Results** page as they arrive; **Delivery** shows what is queued, sent or failed.
+
+### Imaging
+
+Open **Imaging**, **Imaging settings…**, tick **Receive images**, add where images should go under
+**Where images go** (a DICOM node or a DICOMweb server), and point each imaging device at this computer
+(AE title `LABSYNC`, port `11113`, both changeable).
+
+### Integrations
+
+Platform-specific extras live in plugins and are off by default. To use the bundled Serenity plugin, open
+**Settings > Integrations**, turn on **Serenity** and paste the setup code from Serenity's Devices screen. It then
+offers a Serenity destination for results and for images, and shows its connection status in the sidebar.
+Details: [docs/PLUGINS.md](docs/PLUGINS.md).
+
+### Appearance
+
+Use the sun / moon button at the bottom of the sidebar, or **Settings > Appearance**, to switch between light,
+dark and following the system.
 
 ### Data folder
 
@@ -83,7 +111,7 @@ Python 3.11+ with Tk is required for the GUI.
 | Linux | `~/.local/share/labsync` |
 
 Override with `--home <folder>` or `LABSYNC_HOME`. It holds `config.json`, `data/labsync.db`, `logs/` and
-`exports/`.
+`exports/`, and with imaging on, `data/imaging/` (`imaging.db`, `images/`, `state.json`).
 
 ### Command line
 
