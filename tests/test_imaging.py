@@ -1,5 +1,6 @@
-"""Imaging module and the Serenity link, end to end: real DICOM associations
-(pynetdicom as the modality) and a fake Serenity device gateway."""
+"""Imaging module and the Serenity plugin, end to end: real DICOM associations
+(pynetdicom as the modality), a fake Serenity device gateway and a fake
+DICOMweb server."""
 
 from __future__ import annotations
 
@@ -18,13 +19,31 @@ from pydicom.uid import generate_uid
 from pynetdicom import AE, ALL_TRANSFER_SYNTAXES, AllStoragePresentationContexts, evt
 from pynetdicom.sop_class import Verification
 
-from dicom_helpers import KEY, FakeSerenity, free_port, make_dataset, send, split_multipart, wait_until
-from labsync.config import ConfigManager, SecretStore, default_config, new_destination, new_device, validate
+from dicom_helpers import (
+    KEY,
+    FakeDicomWeb,
+    FakeSerenity,
+    free_port,
+    make_dataset,
+    send,
+    split_multipart,
+    wait_until,
+)
+from labsync import plugins
+from labsync.config import (
+    ConfigManager,
+    SecretStore,
+    default_config,
+    new_destination,
+    new_device,
+    new_imaging_destination,
+    validate,
+)
 from labsync.engine import Engine
 from labsync.imaging import forwarder
 from labsync.imaging.destinations import MultipartStream
 from labsync.imaging.service import ImagingService
-from labsync.serenity import apply_setup_code, decode_setup_code
+from labsync.plugins.serenity.link import apply_setup_code, decode_setup_code
 from labsync.storage.db import Database
 
 
@@ -46,11 +65,17 @@ def fast_retries(monkeypatch):
     monkeypatch.setattr(forwarder, "PAUSE_WAITS", [0.3])
 
 
+def pair(cfg, serenity):
+    cfg["plugins"]["serenity"].update(enabled=True, url=serenity.url, device_key=KEY)
+    return cfg
+
+
 def imaging_config(serenity, **imaging):
-    cfg = default_config()
-    cfg["serenity"].update(url=serenity.url, device_key=KEY)
+    cfg = pair(default_config(), serenity)
     cfg["imaging"].update(enabled=True, port=free_port(), min_free_disk_mb=1,
-                          local_nodes=[{"name": "Test US", "ae_title": "US_ROOM1", "ip": ""}], **imaging)
+                          local_nodes=[{"name": "Test US", "ae_title": "US_ROOM1", "ip": ""}],
+                          destinations=[new_imaging_destination("serenity")])
+    cfg["imaging"].update(imaging)
     return cfg
 
 
@@ -234,13 +259,14 @@ def test_copies_go_to_an_extra_dicom_node_too(svc, serenity):
     port = free_port()
     server = other.start_server(("127.0.0.1", port), block=False, evt_handlers=[(evt.EVT_C_STORE, on_store)])
     try:
-        configure(svc, dicom_destinations=[{"id": "pd", "name": "PostDICOM", "ae_title": "POSTDICOM",
-                                             "host": "127.0.0.1", "port": port, "enabled": True}])
-        dest = [d for d in svc.destinations() if d.id == "dicom:pd"][0]
-        assert dest.echo() is None
+        configure(svc, destinations=[*svc.settings.get("destinations"),
+                                     {"id": "pd", "type": "dicom", "name": "PostDICOM", "ae_title": "POSTDICOM",
+                                      "host": "127.0.0.1", "port": port, "enabled": True}])
+        dest = [d for d in svc.destinations() if d.id == "pd"][0]
+        assert dest.echo() is None and "C-ECHO" in dest.test()
         send(port_of(svc), [make_dataset(accession="OK8") for _ in range(3)])
         assert wait_until(lambda: len(received) == 3 and len(serenity.received) == 3)
-        assert wait_until(lambda: states(svc, "dicom:pd") == {"done": 3})
+        assert wait_until(lambda: states(svc, "pd") == {"done": 3})
     finally:
         server.shutdown()
 
@@ -273,7 +299,7 @@ def test_dcmtk_storescu_and_echoscu_interoperate(svc, serenity, tmp_path):
     if not shutil.which("storescu"):
         pytest.skip("dcmtk not installed")
     port = str(port_of(svc))
-    echo = subprocess.run(["echoscu", "-aet", "US_ROOM1", "-aec", "SERENITY", "127.0.0.1", port],
+    echo = subprocess.run(["echoscu", "-aet", "US_ROOM1", "-aec", "LABSYNC", "127.0.0.1", port],
                           capture_output=True, text=True, timeout=30)
     assert echo.returncode == 0, echo.stderr
     files = []
@@ -281,7 +307,7 @@ def test_dcmtk_storescu_and_echoscu_interoperate(svc, serenity, tmp_path):
         path = tmp_path / f"img{i}.dcm"
         make_dataset(accession="OK9").save_as(str(path), write_like_original=False)
         files.append(str(path))
-    store = subprocess.run(["storescu", "-aet", "US_ROOM1", "-aec", "SERENITY", "127.0.0.1", port, *files],
+    store = subprocess.run(["storescu", "-aet", "US_ROOM1", "-aec", "LABSYNC", "127.0.0.1", port, *files],
                            capture_output=True, text=True, timeout=60)
     assert store.returncode == 0, store.stderr
     assert wait_until(lambda: len(serenity.received) == 4)
@@ -313,8 +339,11 @@ def test_setup_code_is_validated_and_key_kept_out_of_the_file(tmp_path):
     for bad in ("", "hello", "SRN1.!!!", "SRN1." + base64.urlsafe_b64encode(b'{"url":"x"}').decode()):
         with pytest.raises(ValueError):
             decode_setup_code(bad)
-    cfg = apply_setup_code(default_config(), good)
-    assert cfg["serenity"]["url"] == "https://api.example.org/v2" and cfg["serenity"]["organization"] == "Clinic"
+    cfg = default_config()
+    cfg["plugins"]["serenity"] = apply_setup_code(cfg["plugins"]["serenity"], good)
+    settings = cfg["plugins"]["serenity"]
+    assert settings["enabled"] and settings["url"] == "https://api.example.org/v2"
+    assert settings["organization"] == "Clinic"
 
     class MemoryKeyring(SecretStore):
         def __init__(self):
@@ -334,18 +363,37 @@ def test_setup_code_is_validated_and_key_kept_out_of_the_file(tmp_path):
     mgr = ConfigManager(tmp_path / "config.json", MemoryKeyring())
     mgr.save(cfg)
     assert "sdk_x" not in (tmp_path / "config.json").read_text()
-    assert ConfigManager(tmp_path / "config.json", mgr.secrets).load()["serenity"]["device_key"] == "sdk_x"
+    assert mgr.secrets.values == {"serenity:device_key": "sdk_x"}
+    assert ConfigManager(tmp_path / "config.json", mgr.secrets).load()["plugins"]["serenity"]["device_key"] == "sdk_x"
 
 
 def test_old_config_files_gain_the_new_sections(tmp_path):
     path = tmp_path / "config.json"
     cfg = default_config()
     del cfg["imaging"]
-    cfg["serenity"] = {"url": "https://x/v2"}
+    del cfg["plugins"]
     path.write_text(json.dumps(cfg))
     loaded = ConfigManager(path, SecretStore(enabled=False)).load()
     assert loaded["imaging"]["port"] == 11113 and loaded["imaging"]["enabled"] is False
-    assert loaded["serenity"]["url"] == "https://x/v2" and loaded["serenity"]["heartbeat_seconds"] == 60
+    assert loaded["imaging"]["ae_title"] == "LABSYNC" and loaded["imaging"]["destinations"] == []
+    assert loaded["plugins"]["serenity"]["enabled"] is False and loaded["plugins"]["serenity"]["heartbeat_seconds"] == 60
+
+
+def test_first_imaging_build_settings_move_to_the_plugin_and_destination_list(tmp_path):
+    path = tmp_path / "config.json"
+    cfg = default_config()
+    del cfg["plugins"]
+    cfg["serenity"] = {"enabled": True, "url": "https://x/v2", "device_key": "sdk_k", "organization": "Clinic"}
+    cfg["imaging"] = {"enabled": True, "ae_title": "SERENITY", "send_to_serenity": True,
+                      "dicom_destinations": [{"id": "pd", "name": "PACS", "ae_title": "PACS", "host": "h", "port": 104}]}
+    path.write_text(json.dumps(cfg))
+    loaded = ConfigManager(path, SecretStore(enabled=False)).load()
+    assert "serenity" not in loaded
+    assert loaded["plugins"]["serenity"]["enabled"] and loaded["plugins"]["serenity"]["url"] == "https://x/v2"
+    assert loaded["imaging"]["ae_title"] == "SERENITY"  # kept: devices are already set up to send to it
+    assert [(d["id"], d["type"]) for d in loaded["imaging"]["destinations"]] == [("serenity", "serenity"), ("pd", "dicom")]
+    assert "send_to_serenity" not in loaded["imaging"] and "dicom_destinations" not in loaded["imaging"]
+    assert not validate(loaded)
 
 
 def test_validation_catches_imaging_port_clashing_with_an_analyzer():
@@ -356,7 +404,9 @@ def test_validation_catches_imaging_port_clashing_with_an_analyzer():
     cfg["imaging"]["ae_title"] = "X" * 17
     assert any("AE title" in p for p in validate(cfg))
     cfg["destinations"] = [new_destination("serenity")]
-    assert any("connect to Serenity" in p for p in validate(cfg))
+    assert any("turn on the Serenity integration" in p for p in validate(cfg))
+    cfg["plugins"]["serenity"]["enabled"] = True
+    assert any("setup code" in p for p in validate(cfg))
 
 
 async def _engine(tmp_path, cfg):
@@ -367,15 +417,16 @@ async def _engine(tmp_path, cfg):
 
 async def test_heartbeat_reports_both_modules_and_downloads_allowed_devices(tmp_path, serenity):
     cfg = imaging_config(serenity)
-    cfg["serenity"]["heartbeat_seconds"] = 3600
+    cfg["plugins"]["serenity"]["heartbeat_seconds"] = 3600
     engine = await _engine(tmp_path, cfg)
     try:
         serenity.modalities = [{"name": "MRI", "ae_title": "mri_1", "allowed_ips": ["127.0.0.1"]}]
-        await engine.heartbeat_once()
-        assert engine.serenity.state["ok"] and engine.serenity.state["organization"] == "Test Clinic"
+        await engine.check_link("serenity")
+        name, state = engine.link_states()["serenity"]
+        assert name == "Serenity" and state.ok and state.details["organization"] == "Test Clinic"
         report = serenity.heartbeats[-1]["report"]
         assert "lab" in report and report["imaging"]["listening"] and "queued" in report
-        assert engine.imaging.settings.get("serenity_nodes")[0]["ae_title"] == "MRI_1"
+        assert engine.imaging.settings.get("remote_nodes")["serenity"][0]["ae_title"] == "MRI_1"
         port = cfg["imaging"]["port"]
         assert await asyncio.to_thread(send, port, [make_dataset(accession="OK11")], "MRI_1") == [0]
         assert await asyncio.to_thread(wait_until, lambda: len(serenity.received) == 1)
@@ -385,7 +436,7 @@ async def test_heartbeat_reports_both_modules_and_downloads_allowed_devices(tmp_
     serenity.stop()
     engine = await _engine(tmp_path, cfg)
     try:
-        assert engine.imaging.settings.get("serenity_nodes")[0]["ae_title"] == "MRI_1"
+        assert engine.imaging.settings.get("remote_nodes")["serenity"][0]["ae_title"] == "MRI_1"
     finally:
         await engine.stop()
 
@@ -412,8 +463,7 @@ async def test_lab_results_go_to_serenity_with_the_device_key(tmp_path, serenity
     from test_pipeline import send_astm
 
     port = free_port()
-    cfg = default_config()
-    cfg["serenity"].update(url=serenity.url, device_key=KEY)
+    cfg = pair(default_config(), serenity)
     dev = new_device("sysmex_xn", port=port)
     dev["transport"]["host"] = "127.0.0.1"
     dest = new_destination("serenity")
@@ -428,10 +478,140 @@ async def test_lab_results_go_to_serenity_with_the_device_key(tmp_path, serenity
         assert body["patient"]["sample_id"] and len(body["results"]) == 6  # the 1.x shape Serenity reads
         assert serenity.lab_results[0]["key"]  # Idempotency-Key
         # A revoked key keeps results queued rather than parking them
-        await engine.apply_config({**cfg, "serenity": {**cfg["serenity"], "device_key": "sdk_revoked"}})
+        revoked = copy.deepcopy(cfg)
+        revoked["plugins"]["serenity"]["device_key"] = "sdk_revoked"
+        await engine.apply_config(revoked)
         await send_astm("127.0.0.1", port, 1, None)
         await asyncio.sleep(1.0)
         status = engine.destination_status()[dest["id"]]
         assert status["failed"] == 0 and status["pending"] == 1 and "device key" in status["last_error"]
     finally:
         await engine.stop()
+
+
+# --------------------------------------------------------------------------- generic destinations and plugins
+
+
+@pytest.fixture
+def dicomweb():
+    fake = FakeDicomWeb(username="pacs", password="secret")
+    fake.start()
+    yield fake
+    fake.stop()
+
+
+def dicomweb_dest(fake, **kw):
+    d = new_imaging_destination("dicomweb", "Hospital PACS")
+    d.update(url=fake.url, auth={"method": "basic", "username": "pacs", "password": "secret"}, **kw)
+    return d
+
+
+def test_images_go_to_a_dicomweb_server_without_any_plugin(tmp_path, dicomweb):
+    cfg = default_config()
+    dest = dicomweb_dest(dicomweb)
+    cfg["imaging"].update(enabled=True, port=free_port(), min_free_disk_mb=1, destinations=[dest],
+                          local_nodes=[{"name": "Test US", "ae_title": "US_ROOM1", "ip": ""}])
+    assert not validate(cfg) and not plugins.enabled(cfg)
+    s = ImagingService(cfg, tmp_path / "imaging")
+    s.start()
+    try:
+        assert "answered" in s.destinations()[0].test()
+        send(port_of(s), [make_dataset(accession="OK1") for _ in range(4)]
+             + [make_dataset(accession="BUSY1"), make_dataset(accession="BAD1")])
+        assert wait_until(lambda: len(dicomweb.received) == 5)  # 4 OK + BUSY after one retry
+        assert wait_until(lambda: states(s, dest["id"]) == {"done": 5, "failed": 1})
+        with s.store.connect() as db:
+            error = db.execute("SELECT last_error FROM deliveries WHERE state = 'failed'").fetchone()[0]
+        assert "does not accept" in error
+    finally:
+        s.stop()
+
+
+def test_wrong_dicomweb_credentials_pause_the_destination_and_keep_images(tmp_path, dicomweb):
+    cfg = default_config()
+    dest = dicomweb_dest(dicomweb)
+    dest["auth"]["password"] = "wrong"
+    cfg["imaging"].update(enabled=True, port=free_port(), min_free_disk_mb=1, destinations=[dest],
+                          local_nodes=[{"name": "Test US", "ae_title": "US_ROOM1", "ip": ""}])
+    s = ImagingService(cfg, tmp_path / "imaging")
+    s.start()
+    try:
+        send(port_of(s), [make_dataset(accession="OK2")])
+        assert wait_until(lambda: "credentials" in s.forwarder.workers[dest["id"]].last_error)
+        assert states(s, dest["id"]) == {"pending": 1} and not dicomweb.received
+        fixed = copy.deepcopy(cfg)
+        fixed["imaging"]["destinations"] = [dicomweb_dest(dicomweb, id=dest["id"])]
+        s.reconfigure(fixed)
+        assert wait_until(lambda: states(s, dest["id"]) == {"done": 1})
+    finally:
+        s.stop()
+
+
+def test_serenity_destinations_are_skipped_while_the_plugin_is_off(tmp_path, serenity, dicomweb):
+    cfg = imaging_config(serenity)
+    cfg["imaging"]["destinations"].append(dicomweb_dest(dicomweb))
+    cfg["plugins"]["serenity"]["enabled"] = False
+    s = ImagingService(cfg, tmp_path / "imaging")
+    s.start()
+    try:
+        assert [d.id for d in s.destinations()] == [cfg["imaging"]["destinations"][1]["id"]]
+        send(port_of(s), [make_dataset(accession="OK3")])
+        assert wait_until(lambda: len(dicomweb.received) == 1)
+        assert not serenity.received and states(s, "serenity") == {}
+    finally:
+        s.stop()
+
+
+def test_nothing_serenity_is_offered_until_the_plugin_is_turned_on():
+    cfg = default_config()
+    assert plugins.lab_destination_types(cfg) == {} and plugins.imaging_destination_types(cfg) == {}
+    assert plugins.enabled(cfg) == []
+    cfg["plugins"]["serenity"]["enabled"] = True
+    assert plugins.lab_destination_types(cfg) == {"serenity": "Serenity"}
+    assert plugins.imaging_destination_types(cfg) == {"serenity": "Serenity"}
+
+
+async def test_engine_has_no_platform_link_without_a_plugin(tmp_path):
+    engine = await _engine(tmp_path, default_config())
+    try:
+        assert engine.links == {} and engine.link_states() == {}
+        report = engine.status_report()
+        assert "lab" in report
+    finally:
+        await engine.stop()
+
+
+def test_remote_device_list_from_the_first_imaging_build_is_kept(tmp_path, serenity):
+    home = tmp_path / "imaging"
+    home.mkdir()
+    (home / "state.json").write_text(json.dumps({"serenity_nodes": [{"name": "CT", "ae_title": "CT_1",
+                                                                     "allowed_ips": []}]}))
+    s = ImagingService(imaging_config(serenity), home)
+    assert [n["ae_title"] for n in s.receiver.allowed_nodes() if n["source"] == "serenity"] == ["CT_1"]
+
+
+def test_a_third_party_plugin_adds_a_destination_type(monkeypatch):
+    from labsync.outbound.senders import HttpSender, make_sender
+
+    class Acme(plugins.Plugin):
+        id = "acme"
+        name = "Acme LIS"
+        lab_destination_types = {"acme": "Acme LIS"}
+
+        def defaults(self):
+            return {"url": ""}
+
+        def make_sender(self, dest, settings):
+            return HttpSender({**dest, "url": settings["url"] + "/results"})
+
+    monkeypatch.setattr(plugins, "_cache", {**plugins.available(), "acme": Acme()})
+    cfg = default_config()
+    cfg["plugins"]["acme"] = {"enabled": True, "url": "https://acme.example"}
+    dest = new_destination("acme")
+    assert dest["name"] == "Acme LIS"
+    cfg["destinations"] = [dest]
+    assert not validate(cfg)
+    sender = make_sender({**dest, "_plugin_settings": plugins.settings_for(cfg, "acme")})
+    assert sender.dest["url"] == "https://acme.example/results"
+    cfg["plugins"]["acme"]["enabled"] = False
+    assert any("turn on the Acme LIS integration" in p for p in validate(cfg))

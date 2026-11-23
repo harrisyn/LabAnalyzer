@@ -17,7 +17,8 @@ datas += collect_data_files("sv_ttk")
 
 hiddenimports = collect_submodules("keyring.backends") + ["labsync.tools.simulator"]
 # Imaging module (loaded lazily, so PyInstaller cannot see it): DICOM stack and its plugins
-hiddenimports += collect_submodules("labsync.imaging") + collect_submodules("pynetdicom") + collect_submodules("pydicom")
+hiddenimports += collect_submodules("labsync.imaging") + collect_submodules("labsync.plugins")
+hiddenimports += collect_submodules("pynetdicom") + collect_submodules("pydicom")
 datas += collect_data_files("pydicom") + collect_data_files("pynetdicom")
 if sys.platform == "win32":
     hiddenimports += ["pystray._win32", "win32timezone"]

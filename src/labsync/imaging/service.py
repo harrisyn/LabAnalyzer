@@ -1,11 +1,11 @@
 """Wires the imaging module together: settings view, receiver, forwarder and disk clean-up.
 
 Settings come from two places:
-- the ``imaging`` and ``serenity`` sections of LabSync's configuration (what
-  people set in the app), and
+- the ``imaging`` section of LabSync's configuration (what people set in the
+  app), plus the settings of plugins that own an imaging destination, and
 - runtime state kept next to the queue (``state.json``): the imaging devices
-  Serenity last said may send through this LabSync, so the list survives a
-  restart without internet.
+  a plugin's platform last said may send through this computer
+  (``remote_nodes``, per plugin), so the list survives a restart offline.
 """
 
 from __future__ import annotations
@@ -20,8 +20,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .. import plugins
 from ..config import default_imaging
-from .destinations import SERENITY, DicomDestination, SerenityDestination
+from .destinations import make_destination
 from .forwarder import Forwarder
 from .receiver import Receiver
 from .store import Store
@@ -29,7 +30,7 @@ from .store import Store
 log = logging.getLogger("labsync.imaging")
 
 CLEANUP_SECONDS = 600
-RUNTIME_KEYS = ("serenity_nodes",)
+RUNTIME_KEYS = ("remote_nodes",)
 LISTEN_KEYS = ("enabled", "ae_title", "port", "bind_address")
 
 
@@ -40,13 +41,15 @@ class ImagingSettings:
         self._lock = threading.RLock()
         self._cfg = copy.deepcopy(cfg)
         self.state_path = Path(state_path)
-        self._state: dict[str, Any] = {"serenity_nodes": []}
+        self._state: dict[str, Any] = {"remote_nodes": {}}
         if self.state_path.exists():
             try:
                 stored = json.loads(self.state_path.read_text(encoding="utf-8"))
+                if isinstance(stored.get("serenity_nodes"), list):  # written by the first imaging build
+                    stored.setdefault("remote_nodes", {})["serenity"] = stored["serenity_nodes"]
                 self._state.update({k: v for k, v in stored.items() if k in RUNTIME_KEYS})
             except (OSError, ValueError):
-                log.warning("imaging state file unreadable; starting with no Serenity devices")
+                log.warning("imaging state file unreadable; starting with no remotely managed devices")
 
     def replace_config(self, cfg: dict[str, Any]) -> None:
         with self._lock:
@@ -56,13 +59,12 @@ class ImagingSettings:
         with self._lock:
             if key in RUNTIME_KEYS:
                 return copy.deepcopy(self._state.get(key))
-            serenity = self._cfg.get("serenity") or {}
-            if key == "serenity_url":
-                return serenity.get("url", "") if serenity.get("enabled", True) else ""
-            if key in ("device_key", "ca_bundle"):
-                return serenity.get(key, "")
             imaging = {**default_imaging(), **(self._cfg.get("imaging") or {})}
             return copy.deepcopy(imaging.get(key))
+
+    def full_config(self) -> dict[str, Any]:
+        with self._lock:
+            return copy.deepcopy(self._cfg)
 
     def update(self, **values: Any) -> None:
         unknown = set(values) - set(RUNTIME_KEYS)
@@ -81,7 +83,7 @@ class ImagingService:
         self.home.mkdir(parents=True, exist_ok=True)
         self.settings = ImagingSettings(cfg, self.home / "state.json")
         self.store = Store(self.home / "imaging.db")
-        self.serenity = SerenityDestination(self.settings)
+        self._dest_cache: dict[str, tuple[str, Any]] = {}
         self.receiver = Receiver(self.settings, self.store, self.home / "images", self.destination_ids,
                                  on_received=self._on_received)
         self.forwarder = Forwarder(self.store, self.settings, self.destinations)
@@ -92,12 +94,25 @@ class ImagingService:
 
     # ------------------------------------------------------------------ destinations
     def destinations(self) -> list:
+        """Destinations to send to now: enabled ones whose type is built in or owned by an enabled plugin.
+        Objects are reused while their settings are unchanged, so HTTP sessions are kept."""
+        cfg = self.settings.full_config()
         dests = []
-        if self.settings.get("send_to_serenity"):
-            dests.append(self.serenity)
-        for spec in self.settings.get("dicom_destinations") or []:
-            if spec.get("enabled", True) and spec.get("id"):
-                dests.append(DicomDestination(self.settings, spec))
+        cache: dict[str, tuple[Any, Any]] = {}
+        for spec in self.settings.get("destinations") or []:
+            if not spec.get("enabled", True) or not spec.get("id"):
+                continue
+            owner = plugins.imaging_destination_owner(cfg, spec.get("type", ""))
+            key = json.dumps([spec, owner[1] if owner else None], sort_keys=True, default=str)
+            prev = self._dest_cache.get(spec["id"])
+            if prev and prev[0] == key:
+                dest = prev[1]
+            else:
+                dest = make_destination(spec, self.settings, lambda t, o=owner: o)
+            if dest is not None:
+                cache[spec["id"]] = (key, dest)
+                dests.append(dest)
+        self._dest_cache = cache
         return dests
 
     def destination_ids(self) -> list[str]:
@@ -135,26 +150,30 @@ class ImagingService:
 
     def reconfigure(self, cfg: dict[str, Any]) -> None:
         """Apply new settings, restarting only what changed."""
-        old = {k: self.settings.get(k) for k in (*LISTEN_KEYS, "dicom_destinations", "send_to_serenity",
-                                                  "serenity_url", "device_key")}
+        old_listen = {k: self.settings.get(k) for k in LISTEN_KEYS}
+        old_plugins = self.settings.full_config().get("plugins")
+        old_dests = self.settings.get("destinations")
         self.settings.replace_config(cfg)
-        new = {k: self.settings.get(k) for k in old}
         if not self.running:
             return
-        if any(old[k] != new[k] for k in LISTEN_KEYS):
+        if any(old_listen[k] != self.settings.get(k) for k in LISTEN_KEYS):
             self.receiver.start()
-        if old["dicom_destinations"] != new["dicom_destinations"] or old["send_to_serenity"] != new["send_to_serenity"]:
+        if old_dests != self.settings.get("destinations") or old_plugins != cfg.get("plugins"):
             self.forwarder.reload()
-        if old["serenity_url"] != new["serenity_url"] or old["device_key"] != new["device_key"]:
+            # New address or credentials: try paused destinations straight away
             for w in self.forwarder.workers.values():
                 w.paused_until = 0
             self.forwarder.nudge()
 
-    def set_serenity_nodes(self, nodes: list[dict[str, Any]]) -> bool:
-        if nodes == self.settings.get("serenity_nodes"):
+    def set_remote_nodes(self, source: str, nodes: list[dict[str, Any]]) -> bool:
+        """Imaging devices a plugin's platform says may send through this computer."""
+        current = self.settings.get("remote_nodes") or {}
+        if current.get(source) == nodes:
             return False
-        self.settings.update(serenity_nodes=nodes)
-        self.store.log_event("info", f"Allowed imaging devices updated from Serenity ({len(nodes)})")
+        current[source] = nodes
+        self.settings.update(remote_nodes=current)
+        name = getattr(plugins.get(source), "name", source)
+        self.store.log_event("info", f"Allowed imaging devices updated from {name} ({len(nodes)})")
         return True
 
     # ------------------------------------------------------------------ housekeeping
@@ -208,8 +227,8 @@ class ImagingService:
             "ae_title": self.settings.get("ae_title"),
             "port": self.settings.get("port"),
             "disk_free_mb": int(shutil.disk_usage(self.home).free / (1024 * 1024)),
-            "destinations": [{"name": d["name"], "paused_for": d["paused_for"], "error": d["last_error"]}
-                             for d in self.forwarder.status() if d["id"] != SERENITY],
+            "destinations": [{"id": d["id"], "name": d["name"], "paused_for": d["paused_for"],
+                              "error": d["last_error"]} for d in self.forwarder.status()],
         }
 
     def status(self) -> dict[str, Any]:

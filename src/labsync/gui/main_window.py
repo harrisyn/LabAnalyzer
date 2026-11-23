@@ -1,4 +1,9 @@
-"""LabSync desktop window."""
+"""LabSync desktop window.
+
+Layout: a sidebar (pages, receiving switch, integrations, theme) and a content
+area with status cards along the top and the current page below. Pages are
+built once and raised when picked; each refreshes only while it is visible.
+"""
 
 from __future__ import annotations
 
@@ -15,13 +20,14 @@ from datetime import UTC, datetime, timedelta
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
-from .. import __version__, paths, updater
+from .. import __version__, paths, plugins, updater
 from ..config import ConfigManager, new_destination, new_device, validate
 from ..devices.catalog import find_profile
 from ..engine import Engine
 from ..logging_setup import log_feed
 from ..storage.db import Database
 from ..transport.runner import DeviceStatus
+from . import theme
 from .common import PAD, local_ts, make_tree, replace_rows
 from .dialogs import DestinationDialog, DeviceDialog, ImagingDialog, SettingsDialog
 from .tray import Tray
@@ -34,36 +40,21 @@ STATE_LABELS = {
     "connected": "Connected", "error": "Error",
 }
 
+PAGES = (
+    ("Instruments", "instruments", "Analyzers connected to this computer"),
+    ("Imaging", "imaging", "Images received from CT, MRI, X-ray and ultrasound devices"),
+    ("Results", "results", "Every result received, and where it went"),
+    ("Delivery", "delivery", "Where results are sent"),
+    ("Messages", "messages", "Every transmission, exactly as it was on the wire"),
+    ("Log", "log", "What LabSync is doing right now"),
+)
 
-def apply_theme(root: tk.Tk, theme: str) -> None:
-    try:
-        import sv_ttk
+THEME_CYCLE = {"system": "light", "light": "dark", "dark": "system"}
 
-        if theme == "system":
-            theme = "light"
-            try:
-                import darkdetect  # optional
 
-                theme = "dark" if darkdetect.isDark() else "light"
-            except Exception:
-                pass
-        sv_ttk.set_theme(theme)
-    except Exception:
-        style = ttk.Style(root)
-        for candidate in ("vista", "aqua", "clam"):
-            if candidate in style.theme_names():
-                style.theme_use(candidate)
-                break
-    import tkinter.font as tkfont
-
-    style = ttk.Style(root)
-    family = tkfont.nametofont("TkDefaultFont").actual("family")
-    style.configure("Hint.TLabel", foreground="#6b7280")
-    style.configure("Section.TLabel", font=(family, 11, "bold"))
-    style.configure("Value.TLabel", font=(family, 11, "bold"))
-    style.configure("Big.TLabel", font=(family, 20, "bold"))
-    style.configure("Title.TLabel", font=(family, 15, "bold"))
-    style.configure("Treeview", rowheight=26)
+def apply_theme(root: tk.Tk, mode: str) -> None:
+    """Kept for callers of the old helper; see ``theme.apply``."""
+    theme.apply(root, mode)
 
 
 class MainWindow:
@@ -76,16 +67,19 @@ class MainWindow:
         self.statuses: dict[str, DeviceStatus] = {}
         self.quitting = False
         self._dirty = {"results": True, "delivery": True, "messages": True, "imaging": True}
+        self.pages: dict[str, ttk.Frame] = {}
+        self.nav: dict[str, ttk.Button] = {}
+        self.current = "Instruments"
 
         root.title(self.cfg.get("app_name", "LabSync"))
-        root.geometry("1240x760")
-        root.minsize(980, 600)
+        root.geometry("1320x800")
+        root.minsize(1040, 640)
         icon = paths.resource_path("icon.png")
         try:
             self._icon = tk.PhotoImage(file=str(icon))
             root.iconphoto(True, self._icon)
         except tk.TclError:
-            pass
+            self._icon = None
         if sys.platform == "win32":
             try:
                 root.iconbitmap(str(paths.resource_path("icon.ico")))
@@ -93,6 +87,8 @@ class MainWindow:
                 pass
 
         self._build()
+        theme.on_change(self._recolor)
+        self._recolor()
         self.tray = Tray(str(paths.resource_path("icon.png")), "LabSync", self.show, self.quit)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         if sys.platform == "darwin":
@@ -112,124 +108,235 @@ class MainWindow:
     # ================================================================== layout
     def _build(self) -> None:
         r = self.root
-        menubar = tk.Menu(r)
-        filem = tk.Menu(menubar, tearoff=False)
-        filem.add_command(label="Settings…", command=self.edit_settings, accelerator="Ctrl+,")
-        filem.add_command(label="Open data folder", command=lambda: _open_path(paths.app_home()))
-        filem.add_command(label="Open log folder", command=lambda: _open_path(paths.log_dir()))
-        filem.add_separator()
-        filem.add_command(label="Quit", command=self.quit, accelerator="Ctrl+Q")
-        menubar.add_cascade(label="File", menu=filem)
-        helpm = tk.Menu(menubar, tearoff=False)
-        helpm.add_command(label="Check for updates…", command=lambda: self.check_updates(silent=False))
-        helpm.add_command(label="Documentation", command=lambda: webbrowser.open("https://github.com/harrisyn/LabAnalyzer#readme"))
-        helpm.add_command(label="About LabSync", command=self.about)
-        menubar.add_cascade(label="Help", menu=helpm)
-        r.config(menu=menubar)
         r.bind_all("<Control-q>", lambda e: self.quit())
         r.bind_all("<Control-comma>", lambda e: self.edit_settings())
+        self._menu = tk.Menu(r, tearoff=False)
+        self._menu.add_command(label="Settings…", command=self.edit_settings, accelerator="Ctrl+,")
+        self._menu.add_command(label="Imaging settings…", command=self.edit_imaging)
+        self._menu.add_separator()
+        self._menu.add_command(label="Open data folder", command=lambda: _open_path(paths.app_home()))
+        self._menu.add_command(label="Open log folder", command=lambda: _open_path(paths.log_dir()))
+        self._menu.add_separator()
+        self._menu.add_command(label="Check for updates…", command=lambda: self.check_updates(silent=False))
+        self._menu.add_command(label="Documentation",
+                               command=lambda: webbrowser.open("https://github.com/harrisyn/LabAnalyzer#readme"))
+        self._menu.add_command(label="About LabSync", command=self.about)
+        self._menu.add_separator()
+        self._menu.add_command(label="Quit", command=self.quit, accelerator="Ctrl+Q")
+        if sys.platform == "darwin":  # macOS keeps its menu bar
+            menubar = tk.Menu(r)
+            menubar.add_cascade(label="LabSync", menu=self._menu)
+            r.config(menu=menubar)
 
-        header = ttk.Frame(r, padding=(PAD * 2, PAD * 1.5, PAD * 2, PAD))
-        header.pack(fill="x")
-        left = ttk.Frame(header)
-        left.pack(side="left")
-        ttk.Label(left, text=self.cfg.get("app_name", "LabSync"), style="Title.TLabel").pack(anchor="w")
-        self.l_instance = ttk.Label(left, text=f"Instance {self.cfg.get('instance_id', '')}", style="Hint.TLabel")
-        self.l_instance.pack(anchor="w")
+        self._build_sidebar()
+        main = ttk.Frame(r, padding=(PAD * 3, PAD * 2.5, PAD * 3, PAD))
+        main.pack(side="left", fill="both", expand=True)
+        self.main = main
+
+        # Status cards
+        kpis = ttk.Frame(main)
+        kpis.pack(fill="x", pady=(0, PAD))
         self.kpis: dict[str, ttk.Label] = {}
-        for key, title in (("connected", "Instruments online"), ("today", "Results today"),
-                           ("pending", "Waiting to send"), ("failed", "Failed deliveries")):
-            box = ttk.Frame(header, padding=(PAD * 2, 0))
-            box.pack(side="left")
-            self.kpis[key] = ttk.Label(box, text="–", style="Big.TLabel")
-            self.kpis[key].pack(anchor="w")
-            ttk.Label(box, text=title, style="Hint.TLabel").pack(anchor="w")
-        self.b_engine = ttk.Button(header, text="Stop receiving", command=self.toggle_engine)
-        self.b_engine.pack(side="right")
+        self.kpi_cards: dict[str, ttk.Frame] = {}
+        for i, (key, title) in enumerate((("connected", "Instruments online"), ("today", "Results today"),
+                                          ("pending", "Waiting to send"), ("failed", "Failed deliveries"),
+                                          ("images", "Images waiting"))):
+            card = ttk.Frame(kpis, style="Card.TFrame", padding=theme.CARD_PAD)
+            card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else PAD // 2, 0))
+            kpis.columnconfigure(i, weight=1, uniform="kpi")
+            self.kpis[key] = ttk.Label(card, text="–", style="CardBig.TLabel")
+            self.kpis[key].pack(anchor="w", padx=4)
+            ttk.Label(card, text=title, style="CardHint.TLabel").pack(anchor="w", padx=4)
+            self.kpi_cards[key] = card
 
-        # The status bar is packed before the notebook so a small window never squeezes it out
-        status = ttk.Frame(r, padding=(PAD * 2, 2))
-        status.pack(fill="x", side="bottom")
+        status = ttk.Frame(main)
+        status.pack(fill="x", side="bottom", pady=(PAD // 2, 0))
         self.l_status = ttk.Label(status, text="", style="Hint.TLabel")
         self.l_status.pack(side="left")
-        self.l_serenity = ttk.Label(status, text="", style="Hint.TLabel")
-        self.l_serenity.pack(side="left", padx=PAD * 2)
-        ttk.Label(status, text=f"LabSync {__version__} · data: {paths.app_home()}", style="Hint.TLabel").pack(side="right")
+        ttk.Label(status, text=f"LabSync {__version__} · {paths.app_home()}", style="Hint.TLabel").pack(side="right")
 
-        self.nb = ttk.Notebook(r)
-        self.nb.pack(fill="both", expand=True, padx=PAD * 2, pady=(0, PAD))
+        self.content = ttk.Frame(main)
+        self.content.pack(fill="both", expand=True, pady=(PAD, 0))
+        self.content.rowconfigure(0, weight=1)
+        self.content.columnconfigure(0, weight=1)
         self._build_devices()
         self._build_imaging()
         self._build_results()
         self._build_delivery()
         self._build_messages()
         self._build_log()
-        self.nb.bind("<<NotebookTabChanged>>", lambda e: self._refresh_current())
+        self.select_page(self.current)
 
-    def _toolbar(self, parent: tk.Misc, buttons: list[tuple[str, Any]]) -> ttk.Frame:
-        bar = ttk.Frame(parent)
-        bar.pack(fill="x", pady=(PAD, PAD))
+    def _build_sidebar(self) -> None:
+        side = ttk.Frame(self.root, style="Sidebar.TFrame", padding=(PAD * 1.5, PAD * 2.5, PAD * 1.5, PAD * 2))
+        side.pack(side="left", fill="y")
+        self.sidebar = side
+        brand = ttk.Frame(side, style="Sidebar.TFrame")
+        brand.pack(fill="x", padx=PAD, pady=(0, PAD * 3))
+        self._brand_icon = None
+        try:
+            from PIL import Image, ImageTk
+
+            img = Image.open(paths.resource_path("icon.png")).convert("RGBA").resize((30, 30), Image.LANCZOS)
+            self._brand_icon = ImageTk.PhotoImage(img)
+            ttk.Label(brand, image=self._brand_icon, style="Sidebar.TLabel").pack(side="left", padx=(0, PAD))
+        except Exception:
+            pass
+        names = ttk.Frame(brand, style="Sidebar.TFrame")
+        names.pack(side="left")
+        ttk.Label(names, text=self.cfg.get("app_name", "LabSync"), style="Brand.TLabel").pack(anchor="w")
+        self.l_instance = ttk.Label(names, text=self.cfg.get("instance_id", ""), style="SidebarHint.TLabel")
+        self.l_instance.pack(anchor="w")
+
+        for title, icon_name, _ in PAGES:
+            b = ttk.Button(side, text=f"  {title}", style="Nav.TButton", compound="left", width=20,
+                           command=lambda t=title: self.select_page(t), takefocus=False)
+            b.pack(fill="x", pady=1)
+            b._icon_name = icon_name  # type: ignore[attr-defined]
+            self.nav[title] = b
+
+        foot = ttk.Frame(side, style="Sidebar.TFrame")
+        foot.pack(side="bottom", fill="x")
+        self.side_links = ttk.Frame(foot, style="Sidebar.TFrame")
+        self.side_links.pack(fill="x", pady=(0, PAD))
+        self.l_receiving = ttk.Label(foot, text="", style="PillNeutral.TLabel")
+        self.l_receiving.pack(anchor="w", pady=(0, PAD))
+        self.b_engine = ttk.Button(foot, text="Stop receiving", command=self.toggle_engine)
+        self.b_engine.pack(fill="x", pady=(0, PAD))
+        row = ttk.Frame(foot, style="Sidebar.TFrame")
+        row.pack(fill="x")
+        self.b_settings = ttk.Button(row, text="  Settings", style="Nav.TButton", compound="left",
+                                     command=self.edit_settings, takefocus=False)
+        self.b_settings.pack(side="left", fill="x", expand=True)
+        self.b_theme = ttk.Button(row, style="Nav.TButton", command=self.cycle_theme, takefocus=False, width=0)
+        self.b_theme.pack(side="left", padx=(2, 0))
+        self.b_more = ttk.Button(row, style="Nav.TButton", takefocus=False, width=0,
+                                 command=lambda: self._menu.tk_popup(self.b_more.winfo_rootx(),
+                                                                     self.b_more.winfo_rooty() - 10))
+        self.b_more.pack(side="left", padx=(2, 0))
+
+    def _recolor(self) -> None:
+        """Things that aren't ttk styles: icons, tag colours, text widgets."""
+        for b in self.nav.values():
+            name = b._icon_name  # type: ignore[attr-defined]
+            b.configure(image=(theme.icon(name, 18, "muted"), "selected", theme.icon(name, 18, "accent")))
+        self.b_settings.configure(image=theme.icon("settings", 18, "muted"))
+        self.b_theme.configure(image=theme.icon("moon" if theme.mode() == "dark" else "sun", 18, "muted"))
+        self.b_more.configure(image=theme.icon("more", 18, "muted"))
+        c = theme.color
+        for tree in (self.t_dev, self.t_img, self.t_res, self.t_dst, self.t_fail, self.t_msg):
+            tree.tag_configure("connected", foreground=c("ok"))
+            tree.tag_configure("error", foreground=c("danger"))
+            tree.tag_configure("problem", foreground=c("danger"))
+            tree.tag_configure("failed", foreground=c("danger"))
+            tree.tag_configure("abnormal", foreground=c("danger"))
+            tree.tag_configure("waiting", foreground=c("warn"))
+            tree.tag_configure("warn", foreground=c("warn"))
+            tree.tag_configure("disabled", foreground=c("faint"))
+            tree.tag_configure("qc", foreground=c("muted"))
+        self.t_log.configure(background=c("surface"), foreground=c("text"), insertbackground=c("text"),
+                             selectbackground=c("accent_soft"), font=theme.FONTS.get("mono", ("TkFixedFont", 9)))
+        self.t_log.tag_configure("WARNING", foreground=c("warn"))
+        self.t_log.tag_configure("ERROR", foreground=c("danger"))
+        self.t_log.tag_configure("CRITICAL", foreground=c("danger"))
+        self.t_log.tag_configure("DEBUG", foreground=c("muted"))
+        self._update_engine_button()
+
+    def _page(self, title: str, subtitle: str) -> tuple[ttk.Frame, ttk.Frame]:
+        """A page: title and actions on top, then a card for the content. Returns (actions, card)."""
+        page = ttk.Frame(self.content)
+        page.grid(row=0, column=0, sticky="nsew")
+        head = ttk.Frame(page)
+        head.pack(fill="x", pady=(0, PAD))
+        left = ttk.Frame(head)
+        left.pack(side="left")
+        ttk.Label(left, text=title, style="Title.TLabel").pack(anchor="w")
+        ttk.Label(left, text=subtitle, style="Subtitle.TLabel").pack(anchor="w")
+        actions = ttk.Frame(head)
+        actions.pack(side="right", anchor="s")
+        card = ttk.Frame(page, style="Card.TFrame", padding=theme.CARD_PAD)
+        card.pack(fill="both", expand=True)
+        self.pages[title] = page
+        return actions, card
+
+    def _actions(self, parent: tk.Misc, buttons: list[tuple[str, Any]]) -> None:
         for text, cmd in buttons:
             if text == "|":
-                ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=PAD)
+                ttk.Separator(parent, orient="vertical").pack(side="left", fill="y", padx=PAD // 2, pady=4)
             else:
-                ttk.Button(bar, text=text, command=cmd, style="Accent.TButton" if text.startswith("Add") else "TButton"
-                           ).pack(side="left", padx=(0, 4))
-        return bar
+                primary = text.startswith("Add") or text.endswith("settings…")
+                ttk.Button(parent, text=text, command=cmd, style="Accent.TButton" if primary else "TButton"
+                           ).pack(side="left", padx=(4, 0))
+
+    def _holder(self, card: ttk.Frame) -> ttk.Frame:
+        holder = ttk.Frame(card, style="Inner.TFrame")
+        holder.pack(fill="both", expand=True)
+        return holder
+
+    def select_page(self, title: str) -> None:
+        self.current = title
+        self.pages[title].tkraise()
+        for t, b in self.nav.items():
+            b.state(["selected"] if t == title else ["!selected"])
+        self._refresh_current()
+
+    def cycle_theme(self) -> None:
+        cfg = copy.deepcopy(self.cfg)
+        cfg["theme"] = THEME_CYCLE.get(cfg.get("theme", "system"), "system")
+        try:
+            self.mgr.save(cfg)
+        except OSError:
+            pass
+        self.cfg = self.mgr.snapshot()
+        theme.apply(self.root, self.cfg["theme"])
+        self.l_status.configure(text=f"Appearance: {self.cfg['theme']}")
 
     def _build_devices(self) -> None:
-        tab = ttk.Frame(self.nb)
-        self.nb.add(tab, text="Instruments")
-        self._toolbar(tab, [("Add instrument", self.add_device), ("Edit", self.edit_device), ("Remove", self.remove_device),
-                            ("|", None), ("Enable / disable", self.toggle_device), ("Reconnect", self.restart_device)])
-        holder = ttk.Frame(tab)
-        holder.pack(fill="both", expand=True)
+        actions, card = self._page("Instruments", PAGES[0][2])
+        self._actions(actions, [("Add instrument", self.add_device), ("Edit", self.edit_device),
+                                ("Remove", self.remove_device), ("|", None), ("Enable / disable", self.toggle_device),
+                                ("Reconnect", self.restart_device)])
+        holder = self._holder(card)
         self.t_dev = make_tree(holder, [
             ("name", "Name", 220), ("model", "Instrument", 220), ("protocol", "Protocol", 80), ("link", "Link", 170),
             ("state", "Status", 150), ("peer", "Connected from / detail", 200), ("last", "Last message", 140),
             ("msgs", "Messages", 80), ("errors", "Errors", 60)], selectmode="browse")
-        self.t_dev.tag_configure("connected", foreground="#15803d")
-        self.t_dev.tag_configure("error", foreground="#b3261e")
-        self.t_dev.tag_configure("disabled", foreground="#9ca3af")
         self.t_dev.bind("<Double-1>", lambda e: self.edit_device())
-        self.l_empty_dev = ttk.Label(tab, style="Hint.TLabel",
+        self.l_empty_dev = ttk.Label(card, style="CardHint.TLabel",
                                      text="No instruments yet. Click 'Add instrument', pick the analyzer model and how it is "
                                           "connected (network or serial).")
 
     def _build_imaging(self) -> None:
-        tab = ttk.Frame(self.nb)
-        self.nb.add(tab, text="Imaging")
-        self._toolbar(tab, [("Imaging settings…", self.edit_imaging), ("|", None),
-                            ("Retry selected study", self.retry_imaging_selected),
-                            ("Retry all waiting", lambda: self.retry_imaging(None))])
-        head = ttk.Frame(tab)
-        head.pack(fill="x", pady=(0, PAD))
-        self.l_img_state = ttk.Label(head, text="", wraplength=1100, justify="left")
+        actions, card = self._page("Imaging", PAGES[1][2])
+        self._actions(actions, [("Retry selected study", self.retry_imaging_selected),
+                                ("Retry all waiting", lambda: self.retry_imaging(None)), ("|", None),
+                                ("Imaging settings…", self.edit_imaging)])
+        head = ttk.Frame(card, style="Inner.TFrame")
+        head.pack(fill="x", pady=(0, PAD), padx=4)
+        self.l_img_state = ttk.Label(head, text="", style="CardPillNeutral.TLabel")
         self.l_img_state.pack(anchor="w")
-        self.l_img_queue = ttk.Label(head, text="", style="Hint.TLabel", wraplength=1100, justify="left")
-        self.l_img_queue.pack(anchor="w")
-        holder = ttk.Frame(tab)
-        holder.pack(fill="both", expand=True)
+        self.l_img_queue = ttk.Label(head, text="", style="CardHint.TLabel", wraplength=1000, justify="left")
+        self.l_img_queue.pack(anchor="w", pady=(6, 0))
+        holder = self._holder(card)
         self.t_img = make_tree(holder, [
             ("time", "Received", 160), ("patient", "Patient", 180), ("accession", "Accession", 110),
             ("modality", "Modality", 70), ("desc", "Study", 180), ("from", "From", 110), ("images", "Images", 60),
-            ("serenity", "Serenity", 120), ("copies", "Copies", 100), ("problem", "Problem", 320)])
-        self.t_img.tag_configure("problem", foreground="#b3261e")
-        self.t_img.tag_configure("waiting", foreground="#b45309")
+            ("delivery", "Delivery", 260), ("problem", "Problem", 320)])
 
     def _build_results(self) -> None:
-        tab = ttk.Frame(self.nb)
-        self.nb.add(tab, text="Results")
-        bar = ttk.Frame(tab)
-        bar.pack(fill="x", pady=PAD)
-        ttk.Label(bar, text="Search").pack(side="left")
+        actions, card = self._page("Results", PAGES[2][2])
+        self._actions(actions, [("Open", self.open_report), ("Export CSV…", self.export_results)])
+        bar = ttk.Frame(card, style="Inner.TFrame")
+        bar.pack(fill="x", pady=(0, PAD), padx=4)
         self.v_search = tk.StringVar()
-        e = ttk.Entry(bar, textvariable=self.v_search, width=28)
-        e.pack(side="left", padx=4)
+        e = ttk.Entry(bar, textvariable=self.v_search, width=30)
+        e.pack(side="left")
+        e.insert(0, "")
         e.bind("<Return>", lambda ev: self.refresh_results())
-        ttk.Label(bar, text="Instrument").pack(side="left", padx=(PAD, 0))
+        ttk.Label(bar, text="Search specimen, patient… then Enter", style="CardHint.TLabel").pack(side="left",
+                                                                                               padx=(6, PAD * 2))
         self.v_rdev = tk.StringVar(value="All")
-        self.cb_rdev = ttk.Combobox(bar, textvariable=self.v_rdev, state="readonly", width=24)
+        self.cb_rdev = ttk.Combobox(bar, textvariable=self.v_rdev, state="readonly", width=22)
         self.cb_rdev.pack(side="left", padx=4)
         self.cb_rdev.bind("<<ComboboxSelected>>", lambda ev: self.refresh_results())
         self.v_period = tk.StringVar(value="Last 7 days")
@@ -238,95 +345,67 @@ class MainWindow:
         cb.pack(side="left", padx=4)
         cb.bind("<<ComboboxSelected>>", lambda ev: self.refresh_results())
         self.v_hideqc = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="Hide QC", variable=self.v_hideqc, command=self.refresh_results).pack(side="left", padx=PAD)
-        ttk.Button(bar, text="Refresh", command=self.refresh_results).pack(side="left")
-        ttk.Button(bar, text="Export CSV…", command=self.export_results).pack(side="right")
-        ttk.Button(bar, text="Open", command=self.open_report).pack(side="right", padx=4)
-        holder = ttk.Frame(tab)
-        holder.pack(fill="both", expand=True)
+        ttk.Checkbutton(bar, text="Hide QC", variable=self.v_hideqc, command=self.refresh_results,
+                        style="Card.TCheckbutton").pack(side="left", padx=PAD)
+        ttk.Button(bar, text="Refresh", command=self.refresh_results).pack(side="right")
+        holder = self._holder(card)
         self.t_res = make_tree(holder, [
             ("time", "Received", 150), ("device", "Instrument", 170), ("specimen", "Specimen", 140),
             ("pid", "Patient ID", 120), ("pname", "Patient", 190), ("tests", "Tests", 60), ("abn", "Abnormal", 70),
             ("kind", "Type", 60), ("delivery", "Delivery", 140)])
-        self.t_res.tag_configure("abnormal", foreground="#b3261e")
-        self.t_res.tag_configure("qc", foreground="#6b7280")
         self.t_res.bind("<Double-1>", lambda e: self.open_report())
 
     def _build_delivery(self) -> None:
-        tab = ttk.Frame(self.nb)
-        self.nb.add(tab, text="Delivery")
-        self._toolbar(tab, [("Add destination", self.add_destination), ("Edit", self.edit_destination),
-                            ("Remove", self.remove_destination), ("|", None), ("Test", self.test_selected_destination),
-                            ("Send now", self.flush_destination), ("Retry failed", self.retry_failed)])
-        paned = ttk.PanedWindow(tab, orient="vertical")
-        paned.pack(fill="both", expand=True)
-        top = ttk.Frame(paned)
+        actions, card = self._page("Delivery", PAGES[3][2])
+        self._actions(actions, [("Test", self.test_selected_destination), ("Send now", self.flush_destination),
+                                ("Retry failed", self.retry_failed), ("|", None), ("Edit", self.edit_destination),
+                                ("Remove", self.remove_destination), ("Add destination", self.add_destination)])
+        top = self._holder(card)
         self.t_dst = make_tree(top, [
-            ("name", "Destination", 200), ("type", "Type", 80), ("target", "Target", 300), ("sched", "Schedule", 120),
+            ("name", "Destination", 200), ("type", "Type", 90), ("target", "Target", 300), ("sched", "Schedule", 120),
             ("pending", "Waiting", 70), ("sent", "Sent", 70), ("failed", "Failed", 70), ("last", "Last error", 320)],
             height=6, selectmode="browse")
-        self.t_dst.tag_configure("failed", foreground="#b3261e")
-        self.t_dst.tag_configure("disabled", foreground="#9ca3af")
         self.t_dst.bind("<Double-1>", lambda e: self.edit_destination())
-        paned.add(top, weight=1)
-        bottom = ttk.Frame(paned)
-        ttk.Label(bottom, text="Failed deliveries (not retried automatically)", style="Section.TLabel").grid(
-            row=2, column=0, sticky="w", pady=(PAD, 2))
-        inner = ttk.Frame(bottom)
-        inner.grid(row=3, column=0, sticky="nsew")
-        bottom.rowconfigure(3, weight=1)
-        bottom.columnconfigure(0, weight=1)
-        self.t_fail = make_tree(inner, [
+        page = self.pages["Delivery"]
+        card.pack_configure(expand=False)
+        head = ttk.Frame(page)
+        head.pack(fill="x", pady=(PAD * 2, PAD))
+        ttk.Label(head, text="Failed deliveries", style="Section.TLabel").pack(side="left")
+        ttk.Label(head, text="not retried automatically", style="Hint.TLabel").pack(side="left", padx=PAD)
+        ttk.Button(head, text="Retry selected", command=self.retry_selected).pack(side="right")
+        card2 = ttk.Frame(page, style="Card.TFrame", padding=theme.CARD_PAD)
+        card2.pack(fill="both", expand=True)
+        self.t_fail = make_tree(self._holder(card2), [
             ("time", "Last attempt", 150), ("dest", "Destination", 160), ("specimen", "Specimen", 130),
             ("device", "Instrument", 150), ("attempts", "Attempts", 70), ("code", "Code", 60), ("error", "Error", 420)],
             height=8)
-        b = ttk.Frame(bottom)
-        b.grid(row=4, column=0, sticky="w", pady=4)
-        ttk.Button(b, text="Retry selected", command=self.retry_selected).pack(side="left")
-        paned.add(bottom, weight=1)
 
     def _build_messages(self) -> None:
-        tab = ttk.Frame(self.nb)
-        self.nb.add(tab, text="Messages")
-        bar = ttk.Frame(tab)
-        bar.pack(fill="x", pady=PAD)
-        ttk.Label(bar, text="Every transmission received or sent, exactly as it was on the wire.",
-                  style="Hint.TLabel").pack(side="left")
-        ttk.Button(bar, text="Refresh", command=self.refresh_messages).pack(side="right")
-        ttk.Button(bar, text="View", command=self.open_message).pack(side="right", padx=4)
-        holder = ttk.Frame(tab)
-        holder.pack(fill="both", expand=True)
+        actions, card = self._page("Messages", PAGES[4][2])
+        self._actions(actions, [("View", self.open_message), ("Refresh", self.refresh_messages)])
+        holder = self._holder(card)
         self.t_msg = make_tree(holder, [
             ("time", "Time", 150), ("device", "Instrument", 170), ("dir", "Dir", 45), ("protocol", "Protocol", 80),
             ("type", "Type", 80), ("sender", "Sender", 200), ("size", "Bytes", 70), ("reports", "Reports", 60),
             ("warn", "Warnings", 300)])
-        self.t_msg.tag_configure("warn", foreground="#b45309")
         self.t_msg.bind("<Double-1>", lambda e: self.open_message())
 
     def _build_log(self) -> None:
-        tab = ttk.Frame(self.nb)
-        self.nb.add(tab, text="Log")
-        bar = ttk.Frame(tab)
-        bar.pack(fill="x", pady=PAD)
+        actions, card = self._page("Log", PAGES[5][2])
         self.v_loglevel = tk.StringVar(value="INFO")
-        ttk.Label(bar, text="Show").pack(side="left")
-        ttk.Combobox(bar, textvariable=self.v_loglevel, values=["DEBUG", "INFO", "WARNING", "ERROR"], state="readonly",
-                     width=10).pack(side="left", padx=4)
+        ttk.Label(actions, text="Show").pack(side="left", padx=(0, 4))
+        ttk.Combobox(actions, textvariable=self.v_loglevel, values=["DEBUG", "INFO", "WARNING", "ERROR"],
+                     state="readonly", width=10).pack(side="left")
         self.v_follow = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar, text="Follow", variable=self.v_follow).pack(side="left", padx=PAD)
-        ttk.Button(bar, text="Clear", command=lambda: self.t_log.delete("1.0", "end")).pack(side="left")
-        ttk.Button(bar, text="Open log folder", command=lambda: _open_path(paths.log_dir())).pack(side="right")
-        frame = ttk.Frame(tab)
-        frame.pack(fill="both", expand=True)
-        self.t_log = tk.Text(frame, wrap="none", font=("TkFixedFont", 9), height=20)
+        ttk.Checkbutton(actions, text="Follow", variable=self.v_follow).pack(side="left", padx=PAD)
+        self._actions(actions, [("Clear", lambda: self.t_log.delete("1.0", "end")),
+                                ("Open log folder", lambda: _open_path(paths.log_dir()))])
+        frame = self._holder(card)
+        self.t_log = tk.Text(frame, wrap="none", height=20, borderwidth=0, highlightthickness=0, padx=6, pady=4)
         ys = ttk.Scrollbar(frame, orient="vertical", command=self.t_log.yview)
         self.t_log.configure(yscrollcommand=ys.set)
         ys.pack(side="right", fill="y")
         self.t_log.pack(fill="both", expand=True)
-        self.t_log.tag_configure("WARNING", foreground="#b45309")
-        self.t_log.tag_configure("ERROR", foreground="#b3261e")
-        self.t_log.tag_configure("CRITICAL", foreground="#b3261e")
-        self.t_log.tag_configure("DEBUG", foreground="#6b7280")
 
     # ================================================================== refresh
     def _poll_events(self) -> None:
@@ -345,7 +424,10 @@ class MainWindow:
                     self._dirty["results"] = True
                 elif kind == "engine":
                     self._update_engine_button()
-                elif kind in ("imaging", "serenity"):
+                elif kind == "plugin":
+                    self._update_links()
+                    self._dirty["imaging"] = True
+                elif kind == "imaging":
                     self._dirty["imaging"] = True
         except Exception:
             pass
@@ -365,7 +447,7 @@ class MainWindow:
             self.root.after(2000, self._periodic)
 
     def _refresh_current(self) -> None:
-        tab = self.nb.tab(self.nb.select(), "text")
+        tab = self.current
         if tab == "Results" and self._dirty["results"]:
             self.refresh_results()
         elif tab == "Delivery" and self._dirty["delivery"]:
@@ -399,20 +481,29 @@ class MainWindow:
                 self.t_log.see("end")
 
     def _update_engine_button(self) -> None:
-        self.b_engine.configure(text="Stop receiving" if self.engine.running else "Start receiving",
-                                style="TButton" if self.engine.running else "Accent.TButton")
-        self.l_status.configure(text="Receiving" if self.engine.running else "Stopped: instruments are not being read")
-        st = self.engine.serenity.state
-        serenity = self.cfg.get("serenity") or {}
-        if not (serenity.get("url") and serenity.get("device_key")):
-            text = "Serenity: not connected (Settings, setup code)"
-        elif st.get("ok"):
-            text = f"Serenity: connected ({st.get('organization') or serenity.get('organization') or 'OK'})"
-        elif st.get("ok") is False:
-            text = f"Serenity: {st.get('error')}"
-        else:
-            text = "Serenity: checking…"
-        self.l_serenity.configure(text=text, foreground="#b3261e" if st.get("ok") is False else "")
+        running = self.engine.running
+        self.b_engine.configure(text="Stop receiving" if running else "Start receiving",
+                                style="TButton" if running else "Accent.TButton")
+        self.l_receiving.configure(text="●  Receiving" if running else "●  Stopped",
+                                   style="PillOk.TLabel" if running else "PillWarn.TLabel")
+        self._update_links()
+
+    def _update_links(self) -> None:
+        """One chip per enabled integration in the sidebar; nothing when none is on."""
+        for w in self.side_links.winfo_children():
+            w.destroy()
+        for _pid, (name, st) in sorted(self.engine.link_states().items()):
+            if st.ok:
+                style, text = "PillOk.TLabel", f"{name}: {st.text or 'connected'}"
+            elif st.ok is False:
+                style, text = "PillDanger.TLabel", f"{name}: offline"
+            else:
+                style, text = "PillNeutral.TLabel", f"{name}: {st.text or 'checking…'}"
+            chip = ttk.Label(self.side_links, text=text, style=style, wraplength=190)
+            chip.pack(anchor="w", pady=(0, 4))
+            if st.ok is False and st.text:
+                ttk.Label(self.side_links, text=st.text, style="SidebarHint.TLabel", wraplength=190,
+                          justify="left").pack(anchor="w", pady=(0, 4))
 
     def _update_kpis(self) -> None:
         devices = [d for d in self.cfg.get("devices", []) if d.get("enabled", True)]
@@ -424,7 +515,13 @@ class MainWindow:
         pending = sum(v.get("pending", 0) for k, v in stats.items() if k in known)
         failed = sum(v.get("failed", 0) for k, v in stats.items() if k in known)
         self.kpis["pending"].configure(text=str(pending))
-        self.kpis["failed"].configure(text=str(failed), foreground="#b3261e" if failed else "")
+        self.kpis["failed"].configure(text=str(failed), foreground=theme.color("danger") if failed else theme.color("text"))
+        status = self.engine.imaging_status() if (self.cfg.get("imaging") or {}).get("enabled") else None
+        if status is not None:
+            totals = status["counts"]["totals"]
+            self.kpis["images"].configure(text=str(totals["pending"] + totals["sending"] + totals["held"]))
+        else:
+            self.kpis["images"].configure(text="off")
         self._update_engine_button()
 
     def refresh_devices(self) -> None:
@@ -510,7 +607,14 @@ class MainWindow:
             mode = sched.get("mode", "realtime")
             sched_text = "Real-time" if mode == "realtime" else (
                 f"Every {sched.get('interval_minutes')} min" if mode == "interval" else f"cron {sched.get('cron')}")
-            target = "Serenity device gateway" if d.get("type") == "serenity" else d.get("url") or (f"{d.get('host')}:{d.get('port')}" if d.get("type") == "hl7_mllp" else d.get("folder", ""))
+            owner = plugins.lab_destination_owner(self.cfg, d.get("type", ""), only_enabled=False)
+            if owner is not None:
+                target = owner[0].describe_destination(d, owner[1])
+                if not plugins.is_enabled(self.cfg, owner[0].id):
+                    target += " (integration turned off)"
+            else:
+                target = d.get("url") or (f"{d.get('host')}:{d.get('port')}" if d.get("type") == "hl7_mllp"
+                                          else d.get("folder", ""))
             tags = ("disabled",) if not d.get("enabled", True) else ("failed",) if st.get("failed") else ()
             rows.append((d["id"], (d.get("name"), d.get("type"), target, sched_text, st.get("pending", 0),
                                    st.get("sent", 0), st.get("failed", 0), st.get("last_error", "")), tags))
@@ -527,24 +631,23 @@ class MainWindow:
         img_cfg = self.cfg.get("imaging") or {}
         status = self.engine.imaging_status()
         if not img_cfg.get("enabled") or status is None or not status["running"]:
-            self.l_img_state.configure(
-                text="Imaging is off. Open 'Imaging settings…' to receive images from CT, MRI, X-ray and ultrasound "
-                     "devices and send them to Serenity.", foreground="")
-            self.l_img_queue.configure(text="")
+            self.l_img_state.configure(text="Imaging is off", style="CardPillNeutral.TLabel")
+            self.l_img_queue.configure(
+                text="Open 'Imaging settings…' to receive images from CT, MRI, X-ray and ultrasound devices and "
+                     "forward them to a PACS, a DICOMweb server or another system.")
             if status is None:
                 replace_rows(self.t_img, [])
                 return
         elif status["error"]:
-            self.l_img_state.configure(text=status["error"], foreground="#b3261e")
+            self.l_img_state.configure(text=status["error"], style="CardPillDanger.TLabel")
         else:
             host, port = status["listening_on"] or ("", img_cfg.get("port"))
             nodes = status["allowed_nodes"]
             self.l_img_state.configure(
-                foreground="#15803d",
-                text=f"Listening as {img_cfg.get('ae_title')} on port {port}. "
-                     f"{len(nodes)} device(s) allowed"
+                style="CardPillOk.TLabel",
+                text=f"●  Listening as {img_cfg.get('ae_title')} on port {port} · {len(nodes)} device(s) allowed"
                      + (f" ({', '.join(sorted({n.get('ae_title', '') for n in nodes})[:6])})" if nodes else "")
-                     + (". Accepting any device." if img_cfg.get("accept_unknown_nodes") else "."))
+                     + (" · accepting any device" if img_cfg.get("accept_unknown_nodes") else ""))
         if status is not None:
             totals = status["counts"]["totals"]
             parts = [f"{status['counts']['received_24h']} image(s) in the last 24 h",
@@ -557,10 +660,9 @@ class MainWindow:
                 parts.append(f"Last refused: {status['last_refused']}")
             self.l_img_queue.configure(text=" · ".join(parts))
         rows = []
+        names = {d.get("id"): d.get("name") or d.get("id") for d in img_cfg.get("destinations") or []}
         for st in self.engine.imaging.store.recent_studies(limit=200):
             dests = st["destinations"]
-            ser = dests.get("serenity", {"counts": {}})
-            copies = {k: v for k, v in dests.items() if k != "serenity"}
 
             def summary(entry: dict[str, Any]) -> str:
                 c = entry["counts"]
@@ -573,14 +675,13 @@ class MainWindow:
                 return "delivered" if c.get("done") else ""
 
             problem = next((e["last_error"] for e in dests.values() if e.get("last_error")), "") or ""
-            ser_text = summary(ser) if "serenity" in dests else "–"
-            copy_text = ", ".join(sorted({summary(e) for e in copies.values()})) if copies else "–"
+            delivery = " · ".join(f"{names.get(k, k)}: {summary(e) or '–'}" for k, e in sorted(dests.items())) or "–"
             states_ = {k for e in dests.values() for k in e["counts"]}
             tags = ("problem",) if "failed" in states_ else ("waiting",) if states_ & {"held", "pending", "sending"} else ()
             rows.append((st["study_instance_uid"] or "unknown", (
                 datetime.fromtimestamp(st["last_received"]).strftime("%Y-%m-%d %H:%M:%S"), st["patient_name"] or "",
                 st["accession_number"] or "", st["modality"] or "", st["study_description"] or "",
-                st["calling_ae"] or "", st["instances"], ser_text, copy_text, problem), tags))
+                st["calling_ae"] or "", st["instances"], delivery, problem), tags))
         replace_rows(self.t_img, rows)
 
     def edit_imaging(self) -> None:
@@ -699,7 +800,8 @@ class MainWindow:
         fut.add_done_callback(done)
 
     def add_destination(self) -> None:
-        dlg = DestinationDialog(self.root, new_destination("http"), self.cfg.get("devices", []), True, self._tester)
+        dlg = DestinationDialog(self.root, new_destination("http"), self.cfg.get("devices", []), True, self._tester,
+                                self.cfg)
         self.root.wait_window(dlg)
         if dlg.result:
             cfg = copy.deepcopy(self.cfg)
@@ -712,7 +814,7 @@ class MainWindow:
             return
         cfg = copy.deepcopy(self.cfg)
         idx = next(i for i, d in enumerate(cfg["destinations"]) if d["id"] == did)
-        dlg = DestinationDialog(self.root, cfg["destinations"][idx], cfg.get("devices", []), False, self._tester)
+        dlg = DestinationDialog(self.root, cfg["destinations"][idx], cfg.get("devices", []), False, self._tester, cfg)
         self.root.wait_window(dlg)
         if dlg.result:
             cfg["destinations"][idx] = dlg.result
@@ -760,9 +862,10 @@ class MainWindow:
             if self._commit(dlg.result):
                 logging.getLogger("labsync").setLevel(self.cfg.get("log_level", "INFO"))
                 self.root.title(self.cfg.get("app_name", "LabSync"))
-                self.l_instance.configure(text=f"Instance {self.cfg.get('instance_id', '')}")
+                self.l_instance.configure(text=self.cfg.get("instance_id", ""))
                 if self.cfg.get("theme") != old_theme:
-                    apply_theme(self.root, self.cfg.get("theme", "light"))
+                    theme.apply(self.root, self.cfg.get("theme", "system"))
+                self._update_links()
 
     # ================================================================== viewers
     def open_report(self) -> None:
@@ -912,7 +1015,7 @@ def run(mgr: ConfigManager, minimized: bool = False) -> int:
         except Exception:
             pass
     root = tk.Tk()
-    apply_theme(root, cfg.get("theme", "light"))
+    theme.apply(root, cfg.get("theme", "system"))
     window = MainWindow(root, mgr, engine, db)
     for problem in validate(cfg):
         log.warning("configuration: %s", problem)

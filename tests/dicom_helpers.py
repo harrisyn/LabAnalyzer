@@ -1,5 +1,6 @@
-"""Shared helpers for the imaging and Serenity tests: a fake Serenity device
-gateway, DICOM test images and a modality (pynetdicom SCU)."""
+"""Shared helpers for the imaging and plugin tests: a fake Serenity device
+gateway, a fake DICOMweb (STOW-RS) server, DICOM test images and a modality
+(pynetdicom SCU)."""
 
 from __future__ import annotations
 
@@ -163,6 +164,85 @@ class FakeSerenity:
         self.start()
 
 
+class FakeDicomWeb:
+    """A DICOMweb server's STOW-RS endpoint (POST /dicom-web/studies), deciding by accession number:
+    OK*  stored   BUSY*  out of resources once, then stored   BAD*  SOP class not supported."""
+
+    def __init__(self, username: str = "", password: str = ""):
+        self.port = free_port()
+        self.received: list[dict] = []
+        self.requests = 0
+        self.busy_seen: set = set()
+        self.auth = None
+        outer = self
+        if username:
+            import base64
+
+            self.auth = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _reply(self, code, data=None):
+                body = json.dumps(data).encode() if data is not None else b""
+                self.send_response(code)
+                self.send_header("Content-Type", "application/dicom+json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _authorised(self):
+                return outer.auth is None or self.headers.get("Authorization") == outer.auth
+
+            def do_GET(self):
+                if not self._authorised():
+                    return self._reply(401)
+                return self._reply(200, []) if self.path.startswith("/dicom-web/studies") else self._reply(404)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length)
+                if not self._authorised():
+                    return self._reply(401)
+                if self.path != "/dicom-web/studies":
+                    return self._reply(404)
+                outer.requests += 1
+                ok, failed = [], []
+                import io
+
+                for raw in split_multipart(body, self.headers["Content-Type"]):
+                    ds = pydicom.dcmread(io.BytesIO(raw))
+                    acc, sop = str(ds.AccessionNumber), str(ds.SOPInstanceUID)
+                    if acc.startswith("BUSY") and sop not in outer.busy_seen:
+                        outer.busy_seen.add(sop)
+                        failed.append((sop, 0xA700))
+                    elif acc.startswith("BAD"):
+                        failed.append((sop, 0x0122))
+                    else:
+                        outer.received.append({"sop": sop, "accession": acc})
+                        ok.append(sop)
+                answer = {
+                    "00081199": {"vr": "SQ", "Value": [{"00081155": {"vr": "UI", "Value": [u]}} for u in ok]},
+                    "00081198": {"vr": "SQ", "Value": [{"00081155": {"vr": "UI", "Value": [u]},
+                                                        "00081197": {"vr": "US", "Value": [c]}} for u, c in failed]},
+                }
+                return self._reply(200 if not failed else (202 if ok else 409), answer)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+
+    @property
+    def url(self):
+        return f"http://127.0.0.1:{self.port}/dicom-web"
+
+    def start(self):
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
 def wait_until(fn, timeout=10.0, interval=0.05):
     end = time.time() + timeout
     while time.time() < end:
@@ -172,7 +252,7 @@ def wait_until(fn, timeout=10.0, interval=0.05):
     return False
 
 
-def send(port, datasets, calling="US_ROOM1", called="SERENITY"):
+def send(port, datasets, calling="US_ROOM1", called="LABSYNC"):
     """Send like a modality would (pynetdicom SCU). Returns DIMSE statuses, or None if rejected."""
     from pynetdicom import AE
 

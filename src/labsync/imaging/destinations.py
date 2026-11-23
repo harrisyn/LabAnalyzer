@@ -1,15 +1,15 @@
 """Where received images go.
 
-SerenityDestination  HTTPS to Serenity's device gateway
-                     (POST {url}/device-gateway/dicom/instances, X-Device-Key),
-                     STOW-RS style multipart/related, streamed from disk.
-DicomDestination     C-STORE to another DICOM node on the network, e.g. the
-                     PostDICOM communicator, for modalities that can only send
-                     to one place.
+DicomDestination     C-STORE to a DICOM node on the network (a PACS, a cloud
+                     PACS communicator such as PostDICOM's, an Orthanc server).
+DicomWebDestination  STOW-RS over HTTPS to any DICOMweb server, streamed
+                     from disk as multipart/related.
+Plugins can add more (see ``labsync.plugins``).
 
+Every destination has ``id``, ``name``, ``configured`` and ``send(rows)``.
 send() returns one outcome per instance:
   stored  delivered (or already there)
-  hold    Serenity has no matching order yet / patient mismatch: try again later
+  hold    the destination is not ready for it yet (e.g. no matching order): try again later
   retry   temporary problem: try again soon
   reject  will never be accepted (not a readable DICOM file)
 and raises Unreachable when the destination could not be reached at all, so
@@ -29,23 +29,22 @@ from .. import __version__
 logger = logging.getLogger(__name__)
 
 STORED, HOLD, RETRY, REJECT = "stored", "hold", "retry", "reject"
-SERENITY = "serenity"
 
 
 class Unreachable(Exception):
     pass
 
 
-def describe_network_error(exc: Exception) -> str:
+def describe_network_error(exc: Exception, name: str) -> str:
     """Plain words for the status page; the full error goes to the log."""
     logger.info("network error: %r", exc)
     if isinstance(exc, requests.exceptions.SSLError):
-        return "Can't reach Serenity: the secure connection failed (certificate problem)"
+        return f"Can't reach {name}: the secure connection failed (certificate problem)"
     if isinstance(exc, requests.exceptions.Timeout):
-        return "Can't reach Serenity: the connection timed out"
+        return f"Can't reach {name}: the connection timed out"
     if isinstance(exc, requests.exceptions.ConnectionError):
-        return "Can't reach Serenity: no connection (check this computer's internet access)"
-    return f"Can't reach Serenity: {exc.__class__.__name__}"
+        return f"Can't reach {name}: no connection (check this computer's network access)"
+    return f"Can't reach {name}: {exc.__class__.__name__}"
 
 
 @dataclass
@@ -111,81 +110,6 @@ class MultipartStream(io.RawIOBase):
         super().close()
 
 
-class SerenityDestination:
-    id = SERENITY
-    name = "Serenity"
-
-    def __init__(self, config):
-        self.config = config
-        self.session = requests.Session()
-
-    def _headers(self) -> dict:
-        return {
-            "X-Device-Key": self.config.get("device_key"),
-            "User-Agent": f"LabSync/{__version__} (imaging)",
-            "Accept": "application/json",
-        }
-
-    def _verify(self):
-        return self.config.get("ca_bundle") or True
-
-    @property
-    def configured(self) -> bool:
-        return bool(self.config.get("serenity_url") and self.config.get("device_key"))
-
-    def heartbeat(self, report: dict) -> dict:
-        url = self.config.get("serenity_url").rstrip("/") + "/device-gateway/heartbeat"
-        try:
-            r = self.session.post(url, json={"version": __version__, "report": report}, headers=self._headers(),
-                                  timeout=30, verify=self._verify())
-        except requests.RequestException as exc:
-            raise Unreachable(describe_network_error(exc)) from exc
-        if r.status_code == 401:
-            raise PermissionError("Serenity did not accept the device key. Issue a new key under Devices in Serenity.")
-        if r.status_code >= 400:
-            raise Unreachable(f"Serenity answered {r.status_code}: {r.text[:200]}")
-        return r.json()
-
-    def send(self, rows: list) -> list[Outcome]:
-        if not self.configured:
-            raise Unreachable("Serenity is not set up yet (enter the setup code)")
-        url = self.config.get("serenity_url").rstrip("/") + "/device-gateway/dicom/instances"
-        boundary = "srn" + uuid.uuid4().hex
-        body = MultipartStream([r["path"] for r in rows], boundary)
-        headers = {
-            **self._headers(),
-            "Content-Type": f'multipart/related; type="application/dicom"; boundary={boundary}',
-        }
-        sources = {r["calling_ae"] for r in rows if r["calling_ae"]}
-        if len(sources) == 1:
-            headers["X-Source-AE-Title"] = sources.pop()
-        try:
-            r = self.session.post(url, data=body, headers=headers, verify=self._verify(),
-                                  timeout=(30, int(self.config.get("request_timeout_seconds") or 300)))
-        except requests.RequestException as exc:
-            raise Unreachable(describe_network_error(exc)) from exc
-        finally:
-            body.close()
-        if r.status_code == 401:
-            raise Unreachable("Serenity did not accept the device key. Issue a new key under Devices in Serenity.")
-        if r.status_code == 413:
-            # Too big for one request: send them one at a time next round
-            if len(rows) > 1:
-                return [Outcome(RETRY, "Too large for one request; sending separately")] * len(rows)
-            return [Outcome(REJECT, "Serenity refused this file as too large (413). Ask the Serenity team to raise the upload limit.")]
-        if r.status_code in (200, 202, 409):
-            try:
-                results = r.json()["results"]
-            except Exception:
-                raise Unreachable(f"Unexpected answer from Serenity ({r.status_code})") from None
-            if len(results) != len(rows):
-                raise Unreachable("Serenity's answer did not match what was sent")
-            return [Outcome(x.get("outcome", RETRY), x.get("detail") or x.get("status") or "") for x in results]
-        if r.status_code >= 500 or r.status_code in (408, 429):
-            raise Unreachable(f"Serenity is busy or unavailable ({r.status_code})")
-        return [Outcome(RETRY, f"Serenity answered {r.status_code}: {r.text[:200]}")] * len(rows)
-
-
 class DicomDestination:
     """C-STORE SCU to another node. Uses our AE title as the calling AE, so
     add LabSync as a node on the other side."""
@@ -193,7 +117,7 @@ class DicomDestination:
     def __init__(self, config, spec: dict):
         self.config = config
         self.spec = spec
-        self.id = f"dicom:{spec['id']}"
+        self.id = spec["id"]
         self.name = spec.get("name") or spec.get("ae_title")
 
     @property
@@ -258,3 +182,155 @@ class DicomDestination:
         finally:
             assoc.release()
         return outcomes
+
+    def test(self) -> str:
+        problem = self.echo()
+        if problem:
+            raise Unreachable(problem)
+        return f"C-ECHO answered by {self.spec['ae_title']} at {self.spec['host']}:{self.spec['port']}"
+
+
+# DICOM status codes a STOW-RS server can give per failed instance (PS3.18 / PS3.4)
+_DUPLICATE = (0x0111,)
+
+
+def _failure_outcome(code: int | None, name: str) -> Outcome:
+    if code is None:
+        return Outcome(RETRY, f"{name} did not store it (no reason given)")
+    if code in _DUPLICATE:
+        return Outcome(STORED, "already there")
+    if 0xA700 <= code <= 0xA7FF or code == 0x0110:
+        return Outcome(RETRY, f"{name} could not store it right now (0x{code:04X})")
+    if code == 0x0122 or 0xA900 <= code <= 0xA9FF or 0xC000 <= code <= 0xCFFF:
+        return Outcome(REJECT, f"{name} does not accept this image (0x{code:04X})")
+    return Outcome(RETRY, f"{name} refused it (0x{code:04X})")
+
+
+def _tag_value(item: dict, tag: str):
+    try:
+        return item[tag]["Value"][0]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+class DicomWebDestination:
+    """STOW-RS (POST {url}/studies) to any DICOMweb server.
+
+    ``spec``: url (the DICOMweb root, e.g. https://pacs.example.org/dicom-web),
+    auth {method none|basic|bearer|api_key, ...}, verify_tls, ca_bundle, headers.
+    """
+
+    def __init__(self, config, spec: dict):
+        self.config = config
+        self.spec = spec
+        self.id = spec["id"]
+        self.name = spec.get("name") or "DICOMweb server"
+        self.session = requests.Session()
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.spec.get("enabled", True) and self.spec.get("url"))
+
+    def _verify(self):
+        if not self.spec.get("verify_tls", True):
+            return False
+        return self.spec.get("ca_bundle") or True
+
+    def _headers(self, accept: str = "application/dicom+json") -> dict:
+        h = {"User-Agent": f"LabSync/{__version__} (imaging)", "Accept": accept, **(self.spec.get("headers") or {})}
+        auth = self.spec.get("auth") or {}
+        method = auth.get("method", "none")
+        if method == "bearer" and auth.get("token"):
+            h["Authorization"] = f"Bearer {auth['token']}"
+        elif method == "api_key" and auth.get("api_key"):
+            h[auth.get("header") or "X-API-Key"] = auth["api_key"]
+        return h
+
+    def _auth(self):
+        auth = self.spec.get("auth") or {}
+        if auth.get("method") == "basic":
+            return (auth.get("username", ""), auth.get("password", ""))
+        return None
+
+    def _root(self) -> str:
+        return str(self.spec.get("url", "")).rstrip("/")
+
+    def test(self) -> str:
+        try:
+            r = self.session.get(self._root() + "/studies", params={"limit": 1}, headers=self._headers(),
+                                 auth=self._auth(), timeout=20, verify=self._verify())
+        except requests.RequestException as exc:
+            raise Unreachable(describe_network_error(exc, self.name)) from exc
+        if r.status_code in (401, 403):
+            raise Unreachable(f"{self.name} refused the credentials ({r.status_code})")
+        if r.status_code >= 400:
+            raise Unreachable(f"{self.name} answered {r.status_code}")
+        return f"{self.name} answered ({r.status_code})"
+
+    def send(self, rows: list) -> list[Outcome]:
+        boundary = "lsy" + uuid.uuid4().hex
+        body = MultipartStream([r["path"] for r in rows], boundary)
+        headers = {**self._headers(),
+                   "Content-Type": f'multipart/related; type="application/dicom"; boundary={boundary}'}
+        try:
+            r = self.session.post(self._root() + "/studies", data=body, headers=headers, auth=self._auth(),
+                                  verify=self._verify(),
+                                  timeout=(30, int(self.config.get("request_timeout_seconds") or 300)))
+        except requests.RequestException as exc:
+            raise Unreachable(describe_network_error(exc, self.name)) from exc
+        finally:
+            body.close()
+        if r.status_code in (401, 403):
+            raise Unreachable(f"{self.name} refused the credentials ({r.status_code}). Check the destination's sign-in.")
+        if r.status_code == 413:
+            if len(rows) > 1:
+                return [Outcome(RETRY, "Too large for one request; sending separately")] * len(rows)
+            return [Outcome(REJECT, f"{self.name} refused this file as too large (413)")]
+        if r.status_code >= 500 or r.status_code in (408, 429):
+            raise Unreachable(f"{self.name} is busy or unavailable ({r.status_code})")
+        if r.status_code == 200:
+            return [Outcome(STORED)] * len(rows)
+        if r.status_code in (202, 409):
+            failed: dict[str, int | None] = {}
+            try:
+                answer = r.json()
+                if isinstance(answer, list):
+                    answer = answer[0] if answer else {}
+                for item in (answer.get("00081198") or {}).get("Value") or []:
+                    uid = _tag_value(item, "00081155")
+                    if uid:
+                        failed[str(uid)] = _tag_value(item, "00081197")
+            except Exception:
+                logger.info("STOW-RS answer from %s was not DICOM JSON", self.name)
+                if r.status_code == 409:
+                    return [Outcome(RETRY, f"{self.name} did not store them (409)")] * len(rows)
+            out = []
+            for row in rows:
+                uid = str(row["sop_instance_uid"])
+                if uid in failed:
+                    code = failed[uid]
+                    out.append(_failure_outcome(int(code) if code is not None else None, self.name))
+                elif r.status_code == 409 and not failed:
+                    out.append(Outcome(RETRY, f"{self.name} did not store it (409)"))
+                else:
+                    out.append(Outcome(STORED))
+            return out
+        if r.status_code == 415:
+            return [Outcome(REJECT, f"{self.name} does not accept this kind of upload (415)")] * len(rows)
+        return [Outcome(RETRY, f"{self.name} answered {r.status_code}: {r.text[:200]}")] * len(rows)
+
+
+def make_destination(spec: dict, imaging_config, plugin_lookup=None):
+    """The destination object for one entry of ``imaging.destinations``.
+
+    ``plugin_lookup(type) -> (plugin, settings) | None`` resolves plugin types."""
+    dest_type = spec.get("type", "dicom")
+    if dest_type == "dicom":
+        return DicomDestination(imaging_config, spec)
+    if dest_type == "dicomweb":
+        return DicomWebDestination(imaging_config, spec)
+    owner = plugin_lookup(dest_type) if plugin_lookup else None
+    if owner is None:
+        return None
+    plugin, settings = owner
+    return plugin.make_imaging_destination(spec, settings, imaging_config)

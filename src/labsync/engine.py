@@ -2,8 +2,9 @@
 
 Two modules share it: the analyzer engine (devices, outbox, destinations, all
 on this asyncio loop) and the imaging module (a DICOM node with its own
-threads, queue and folder, see ``labsync.imaging``). Both use the one link to
-Serenity (device key and heartbeat, see ``labsync.serenity``).
+threads, queue and folder, see ``labsync.imaging``). Integration plugins
+(``labsync.plugins``) add destination types and, optionally, a link to their
+platform that the engine checks in with on a timer.
 
 The engine runs on its own asyncio event loop. The desktop GUI starts it in a
 background thread and talks to it through ``call`` (thread-safe coroutine
@@ -24,7 +25,7 @@ from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__, plugins
 from .devices.catalog import find_profile, merged_options
 from .models import LabMessage, Report
 from .outbound.dispatcher import DestinationWorker
@@ -32,7 +33,6 @@ from .outbound.orders import make_order_source
 from .outbound.senders import make_sender
 from .protocols import handler_for
 from .protocols.base import SessionContext
-from .serenity import HEARTBEAT_SECONDS, SerenityLink, allowed_modalities
 from .storage.db import Database
 from .transport.runner import DeviceRunner, DeviceStatus
 
@@ -47,8 +47,10 @@ class Engine:
             imaging_home = Path(db.path).parent / "imaging"
         self.imaging_home = imaging_home
         self.imaging = None  # ImagingService, created when the imaging module is first switched on
-        self.serenity = SerenityLink(self.config.get("serenity") or {})
-        self._heartbeat: asyncio.Task | None = None
+        self.links: dict[str, plugins.Link] = {}
+        self._link_keys: dict[str, str] = {}
+        self._link_tasks: dict[str, asyncio.Task] = {}
+        self._sync_links()
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=10000)
         self.loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -110,7 +112,7 @@ class Engine:
         self.running = True
         await self._start_lab()
         await self._sync_imaging()
-        self._heartbeat = asyncio.create_task(self._heartbeat_loop(), name="serenity-heartbeat")
+        self._start_link_tasks()
         self._housekeeping = asyncio.create_task(self._housekeeping_loop())
         log.info("engine started: %d device(s), %d destination(s), imaging %s", len(self.runners),
                  len(self.workers), "on" if self.imaging_on else "off")
@@ -140,18 +142,20 @@ class Engine:
         self.workers.clear()
 
     def _sender_config(self, dest: dict[str, Any]) -> dict[str, Any]:
-        """A Serenity destination takes its address and key from the shared Serenity link."""
-        if dest.get("type") == "serenity":
-            return {**dest, "serenity": copy.deepcopy(self.config.get("serenity") or {})}
+        """A destination type added by a plugin gets that plugin's settings (address, key...)."""
+        owner = plugins.lab_destination_owner(self.config, dest.get("type", ""), only_enabled=False)
+        if owner is not None:
+            return {**dest, "_plugin_settings": copy.deepcopy(owner[1])}
         return dest
 
     async def stop(self) -> None:
         if not self.running:
             return
         self.running = False
-        for task in (self._housekeeping, self._heartbeat):
+        for task in (self._housekeeping, *self._link_tasks.values()):
             if task is not None:
                 task.cancel()
+        self._link_tasks.clear()
         await self._stop_lab()
         if self.imaging is not None and self.imaging.running:
             await asyncio.get_running_loop().run_in_executor(None, self.imaging.stop)
@@ -161,18 +165,20 @@ class Engine:
     async def apply_config(self, config: dict[str, Any]) -> None:
         """Apply a new configuration. The analyzer side restarts; the imaging module only
         restarts the parts whose settings changed, so a lab change never drops a DICOM transfer."""
-        old_serenity = self.config.get("serenity")
         if not self.running:
             self.config = copy.deepcopy(config)
-            self.serenity.settings = self.config.get("serenity") or {}
+            self._sync_links()
             return
         await self._stop_lab()
         self.config = copy.deepcopy(config)
-        self.serenity.settings = self.config.get("serenity") or {}
+        changed = self._sync_links()
         await self._start_lab()
         await self._sync_imaging()
-        if self.config.get("serenity") != old_serenity:
-            asyncio.create_task(self.heartbeat_once())
+        for pid in changed:
+            task = self._link_tasks.pop(pid, None)
+            if task is not None:
+                task.cancel()
+        self._start_link_tasks()
         self._publish("engine", "started")
 
     # ------------------------------------------------------------------ imaging
@@ -210,8 +216,48 @@ class Engine:
     def imaging_status(self) -> dict[str, Any] | None:
         return self.imaging.status() if self.imaging is not None else None
 
-    # ------------------------------------------------------------------ Serenity
-    def serenity_report(self) -> dict[str, Any]:
+    # ------------------------------------------------------------------ plugin links
+    def _sync_links(self) -> set[str]:
+        """Create, replace or drop plugin links to match the configuration; return the ids that changed."""
+        import json
+
+        changed: set[str] = set()
+        wanted = {p.id: (p, s) for p, s in plugins.enabled(self.config)}
+        for pid in list(self.links):
+            if pid not in wanted:
+                self.links.pop(pid).close()
+                self._link_keys.pop(pid, None)
+                changed.add(pid)
+                self._publish("plugin", pid)
+        for pid, (plugin, settings) in wanted.items():
+            key = json.dumps(settings, sort_keys=True, default=str)
+            if self._link_keys.get(pid) == key:
+                continue
+            old = self.links.pop(pid, None)
+            if old is not None:
+                old.close()
+            link = plugin.make_link(settings)
+            self._link_keys[pid] = key
+            changed.add(pid)
+            if link is not None:
+                self.links[pid] = link
+        return changed
+
+    def _start_link_tasks(self) -> None:
+        for pid in self.links:
+            task = self._link_tasks.get(pid)
+            if task is None or task.done():
+                self._link_tasks[pid] = asyncio.create_task(self._link_loop(pid), name=f"plugin-{pid}")
+
+    def link_states(self) -> dict[str, tuple[str, plugins.LinkState]]:
+        """{plugin id: (plugin name, state)} for every enabled plugin with a link."""
+        out = {}
+        for pid, link in self.links.items():
+            plugin = plugins.get(pid)
+            out[pid] = (plugin.name if plugin else pid, copy.copy(link.state))
+        return out
+
+    def status_report(self) -> dict[str, Any]:
         lab = {
             "devices": [
                 {"id": k, "name": r.name, "state": r.status.state, "detail": r.status.detail,
@@ -223,31 +269,38 @@ class Engine:
         report: dict[str, Any] = {"lab": lab}
         if self.imaging_on:
             report["imaging"] = self.imaging.report()
-            # Kept at the top level too: Serenity's Devices screen reads the queue size from here
+            # Kept at the top level too for platforms that read the imaging queue size from here
             report.update({k: report["imaging"][k] for k in ("queued", "held", "failed", "received_24h",
                                                               "listening", "listener_error")})
         return report
 
-    async def heartbeat_once(self) -> None:
+    async def check_link(self, plugin_id: str) -> None:
+        """Check in with one plugin's platform now (status out, allowed imaging devices back)."""
+        link = self.links.get(plugin_id)
+        if link is None:
+            return
         loop = asyncio.get_running_loop()
-        report = self.serenity_report()
-        answer = await loop.run_in_executor(None, self.serenity.heartbeat, report)
+        answer = await loop.run_in_executor(None, link.check, self.status_report())
         if answer is not None and self.imaging is not None:
-            nodes = allowed_modalities(answer)
+            nodes = link.remote_nodes(answer)
             if nodes is not None:
-                await loop.run_in_executor(None, self.imaging.set_serenity_nodes, nodes)
-        self._publish("serenity", dict(self.serenity.state))
+                await loop.run_in_executor(None, self.imaging.set_remote_nodes, plugin_id, nodes)
+        self._publish("plugin", plugin_id)
 
-    async def _heartbeat_loop(self) -> None:
-        while True:
+    async def check_links(self) -> None:
+        for pid in list(self.links):
+            await self.check_link(pid)
+
+    async def _link_loop(self, plugin_id: str) -> None:
+        while plugin_id in self.links:
             try:
-                await self.heartbeat_once()
+                await self.check_link(plugin_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("Serenity heartbeat failed")
-            seconds = int((self.config.get("serenity") or {}).get("heartbeat_seconds") or HEARTBEAT_SECONDS)
-            await asyncio.sleep(max(10, seconds))
+                log.exception("check-in with plugin %s failed", plugin_id)
+            link = self.links.get(plugin_id)
+            await asyncio.sleep(max(10, int(getattr(link, "interval_seconds", 60) or 60)))
 
     async def restart_device(self, device_id: str) -> None:
         runner = self.runners.pop(device_id, None)

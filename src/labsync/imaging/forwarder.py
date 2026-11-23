@@ -5,11 +5,11 @@ One worker thread per destination. Each round it takes a batch of due images
 
 - stored  -> done
 - retry   -> try again with growing waits: 30 s, 1, 2, 5, 10, then every 15 min, forever
-- hold    -> Serenity has no matching order yet. Try again at 5, 15, 30 min, then
+- hold    -> the destination isn't ready for it yet (e.g. no matching order). Try again at 5, 15, 30 min, then
              hourly for hold_retry_days (default 7), then mark failed (still
              retryable from the page).
 - reject  -> failed; never sent again unless retried by hand
-- destination unreachable (offline, Serenity down, bad key) -> nothing is counted
+- destination unreachable (offline, server down, bad credentials) -> nothing is counted
   against the images; the whole destination pauses 15 s, 30 s, 1, 2, 5 min...
 """
 

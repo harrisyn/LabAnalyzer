@@ -21,6 +21,7 @@ from typing import Any
 
 from croniter import croniter
 
+from . import plugins
 from .devices.catalog import LEGACY_ANALYZER_NAMES, find_profile
 
 log = logging.getLogger("labsync.config")
@@ -31,7 +32,9 @@ KEYRING_SERVICE = "LabSync"
 SECRET_FIELDS = ("api_key", "token", "password", "client_secret")
 
 TRANSPORT_TYPES = ("tcp_server", "tcp_client", "serial")
-DESTINATION_TYPES = ("http", "fhir", "hl7_mllp", "file", "serenity")
+DESTINATION_TYPES = ("http", "fhir", "hl7_mllp", "file")  # built in; plugins can add more
+IMAGING_DESTINATION_TYPES = ("dicom", "dicomweb")  # built in; plugins can add more
+THEMES = ("system", "light", "dark")
 SCHEDULE_MODES = ("realtime", "interval", "cron")
 AUTH_METHODS = ("none", "api_key", "bearer", "basic", "oauth2")
 
@@ -47,42 +50,28 @@ def default_config() -> dict[str, Any]:
         "check_updates": True,
         "log_level": "INFO",
         "retention_days": 0,
-        "theme": "light",
+        "theme": "system",
         "devices": [],
         "destinations": [],
         "orders": {"provider": "none", "url": "", "timeout": 10, "auth": {"method": "none"}},
-        "serenity": default_serenity(),
         "imaging": default_imaging(),
-    }
-
-
-def default_serenity() -> dict[str, Any]:
-    """The link to Serenity, filled from the setup code on Serenity's Devices screen."""
-    return {
-        "enabled": True,
-        "url": "",  # Serenity API address with /v2, e.g. https://api.serenity.health/v2
-        "device_key": "",  # sdk_...; kept in the OS credential store
-        "device_id": "",
-        "device_name": "",
-        "organization": "",
-        "ca_bundle": "",  # optional CA bundle for HTTPS-inspecting proxies
-        "heartbeat_seconds": 60,
+        "plugins": plugins.default_plugin_settings(),
     }
 
 
 def default_imaging() -> dict[str, Any]:
-    """The imaging module: a DICOM storage node that forwards images to Serenity."""
+    """The imaging module: a DICOM storage node that forwards images to one or more destinations."""
     return {
         "enabled": False,
-        "ae_title": "SERENITY",  # same as Serenity's own DICOM receiver
-        "port": 11113,  # avoids 104 and 11112, which PACS and PostDICOM commonly use
+        "ae_title": "LABSYNC",
+        "port": 11113,  # avoids 104 and 11112, which PACS and cloud PACS communicators commonly use
         "bind_address": "0.0.0.0",
         "accept_unknown_nodes": False,
         "local_nodes": [],  # [{"name", "ae_title", "ip"}] added on site
-        "send_to_serenity": True,
-        "dicom_destinations": [],  # [{"id", "name", "ae_title", "host", "port", "enabled"}]
+        # [{"id", "type": "dicom"|"dicomweb"|<plugin type>, "name", "enabled", ...}], see new_imaging_destination
+        "destinations": [],
         "batch_max_instances": 10,
-        "batch_max_bytes": 40 * 1024 * 1024,  # staging nginx allows a little over 50 MB per request
+        "batch_max_bytes": 40 * 1024 * 1024,  # stays under the common 50 MB reverse-proxy upload limit
         "request_timeout_seconds": 300,
         "hold_retry_days": 7,
         "retention_days": 7,  # delivered images are deleted after this; undelivered never
@@ -106,10 +95,13 @@ def new_device(profile_id: str = "generic_astm", name: str = "", port: int = 500
 
 
 def new_destination(dest_type: str = "http", name: str = "") -> dict[str, Any]:
+    labels = {"http": "REST endpoint", "fhir": "FHIR server", "hl7_mllp": "LIS (HL7)", "file": "Export folder"}
+    owner = None if dest_type in labels else plugins.lab_destination_owner({}, dest_type, only_enabled=False)
+    if dest_type not in labels and owner is None:
+        raise ValueError(f"unknown destination type {dest_type!r}")
     base: dict[str, Any] = {
         "id": f"dst-{uuid.uuid4().hex[:8]}",
-        "name": name or {"http": "REST endpoint", "fhir": "FHIR server", "hl7_mllp": "LIS (HL7)", "file": "Export folder",
-                         "serenity": "Serenity"}[dest_type],
+        "name": name or labels.get(dest_type) or owner[0].lab_destination_types[dest_type],
         "type": dest_type,
         "enabled": True,
         "schedule": {"mode": "realtime", "interval_minutes": 15, "cron": "0 * * * *"},
@@ -129,8 +121,29 @@ def new_destination(dest_type: str = "http", name: str = "") -> dict[str, Any]:
                      "receiving_facility": "", "sending_facility": ""})
     elif dest_type == "file":
         base.update({"folder": "", "format": "json"})
-    elif dest_type == "serenity":
-        base.update({"name": name or "Serenity", "timeout": 30})
+    elif owner is not None:
+        extra = owner[0].new_lab_destination(dest_type)
+        if name:
+            extra.pop("name", None)
+        base.update(extra)
+    return base
+
+
+def new_imaging_destination(dest_type: str = "dicom", name: str = "") -> dict[str, Any]:
+    base: dict[str, Any] = {"id": f"img-{uuid.uuid4().hex[:6]}", "type": dest_type, "enabled": True}
+    if dest_type == "dicom":
+        base.update(name=name or "DICOM node", ae_title="", host="", port=104)
+    elif dest_type == "dicomweb":
+        base.update(name=name or "DICOMweb server", url="", verify_tls=True, ca_bundle="", headers={},
+                    auth={"method": "none"})
+    else:
+        owner = plugins.imaging_destination_owner({}, dest_type, only_enabled=False)
+        if owner is None:
+            raise ValueError(f"unknown imaging destination type {dest_type!r}")
+        base.update(owner[0].new_imaging_destination(dest_type))
+        base["id"] = dest_type if dest_type.isidentifier() else base["id"]
+        if name:
+            base["name"] = name
     return base
 
 
@@ -198,9 +211,12 @@ def _secret_slots(cfg: dict[str, Any]):
     for f in SECRET_FIELDS:
         if f in orders_auth:
             yield orders_auth, f, f"orders:{f}"
-    serenity = cfg.get("serenity")
-    if isinstance(serenity, dict) and "device_key" in serenity:
-        yield serenity, "device_key", "serenity:device_key"
+    for dest in (cfg.get("imaging") or {}).get("destinations") or []:
+        auth = dest.get("auth") or {}
+        for f in SECRET_FIELDS:
+            if f in auth:
+                yield auth, f, f"imaging:{dest.get('id')}:{f}"
+    yield from plugins.secret_slots(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +268,30 @@ def migrate_v1(old: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
+def migrate_sections(raw: dict[str, Any]) -> dict[str, Any]:
+    """Settings written by the first imaging build: a top-level ``serenity`` section and
+    ``send_to_serenity``/``dicom_destinations`` under imaging. Both now belong to the
+    Serenity plugin and the imaging destinations list."""
+    raw = copy.deepcopy(raw)
+    old = raw.pop("serenity", None)
+    if isinstance(old, dict):
+        pl = raw.setdefault("plugins", {})
+        current = pl.get("serenity") or {}
+        settings = {k: v for k, v in old.items() if k != "enabled"}
+        settings["enabled"] = bool(old.get("url") and old.get("enabled", True))
+        pl["serenity"] = {**settings, **current}
+    img = raw.get("imaging")
+    if isinstance(img, dict) and ("send_to_serenity" in img or "dicom_destinations" in img):
+        dests = list(img.get("destinations") or [])
+        paired = bool(((raw.get("plugins") or {}).get("serenity") or {}).get("enabled"))
+        if img.pop("send_to_serenity", False) and paired and not any(d.get("type") == "serenity" for d in dests):
+            dests.append({"id": "serenity", "type": "serenity", "name": "Serenity", "enabled": True})
+        for d in img.pop("dicom_destinations", None) or []:
+            dests.append({**d, "type": "dicom"})
+        img["destinations"] = dests
+    return raw
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -299,8 +339,13 @@ def validate(cfg: dict[str, Any]) -> list[str]:
         ids.add(dest.get("id", ""))
         dtype = dest.get("type")
         if dtype not in DESTINATION_TYPES:
-            problems.append(f"destination {name!r}: type must be one of {', '.join(DESTINATION_TYPES)}")
-            continue
+            owner = plugins.lab_destination_owner(cfg, dtype or "", only_enabled=False)
+            if owner is None:
+                problems.append(f"destination {name!r}: type must be one of {', '.join(DESTINATION_TYPES)}")
+                continue
+            if "plugins" in cfg and not plugins.is_enabled(cfg, owner[0].id):
+                problems.append(f"destination {name!r}: turn on the {owner[0].name} integration first "
+                                "(Settings > Integrations)")
         if dtype in ("http", "fhir"):
             url = str(dest.get("url", ""))
             if not url.startswith(("http://", "https://")):
@@ -314,8 +359,6 @@ def validate(cfg: dict[str, Any]) -> list[str]:
             problems.append(f"destination {name!r}: host is required")
         elif dtype == "file" and not dest.get("folder"):
             problems.append(f"destination {name!r}: folder is required")
-        elif dtype == "serenity" and "serenity" in cfg and not ((cfg.get("serenity") or {}).get("url")):
-            problems.append(f"destination {name!r}: connect to Serenity first (Settings, Serenity setup code)")
         sched = dest.get("schedule") or {}
         mode = sched.get("mode", "realtime")
         if mode not in SCHEDULE_MODES:
@@ -329,6 +372,8 @@ def validate(cfg: dict[str, Any]) -> list[str]:
             except (TypeError, ValueError):
                 problems.append(f"destination {name!r}: interval must be a positive number of minutes")
     problems.extend(_validate_imaging(cfg, listen))
+    for plugin, settings in plugins.enabled(cfg):
+        problems.extend(plugin.validate(settings))
     return problems
 
 
@@ -350,9 +395,31 @@ def _validate_imaging(cfg: dict[str, Any], listen: dict[tuple[str, int], str]) -
     for (_host, p), name in listen.items():
         if p == port:
             problems.append(f"imaging: DICOM port {port} is also used by instrument {name!r}")
-    for d in img.get("dicom_destinations") or []:
-        if not d.get("host") or not d.get("ae_title") or not d.get("port"):
-            problems.append(f"imaging: copy destination {d.get('name') or d.get('id')!r} needs AE title, host and port")
+    problems.extend(validate_imaging_destinations(cfg, img.get("destinations") or []))
+    return problems
+
+
+def validate_imaging_destinations(cfg: dict[str, Any], dests: list[dict[str, Any]]) -> list[str]:
+    problems = []
+    seen: set[str] = set()
+    for d in dests:
+        name = d.get("name") or d.get("id")
+        if not d.get("id") or d["id"] in seen:
+            problems.append(f"imaging: destination {name!r} needs a unique id")
+        seen.add(d.get("id", ""))
+        dtype = d.get("type", "dicom")
+        if dtype == "dicom":
+            if not d.get("host") or not d.get("ae_title") or not d.get("port"):
+                problems.append(f"imaging: destination {name!r} needs AE title, host and port")
+        elif dtype == "dicomweb":
+            if not str(d.get("url", "")).startswith(("http://", "https://")):
+                problems.append(f"imaging: destination {name!r}: URL must start with http:// or https://")
+        else:
+            owner = plugins.imaging_destination_owner(cfg, dtype, only_enabled=False)
+            if owner is None:
+                problems.append(f"imaging: destination {name!r} has unknown type {dtype!r}")
+            elif "plugins" in cfg and not plugins.is_enabled(cfg, owner[0].id):
+                problems.append(f"imaging: destination {name!r}: turn on the {owner[0].name} integration first")
     return problems
 
 
@@ -392,11 +459,16 @@ class ConfigManager:
             raw = migrate_v1(raw)
             self.migrated_from = 1
             log.info("migrated configuration from LabSync 1.x (backup at %s)", backup)
+        raw = migrate_sections(raw)
         merged = default_config()
         merged.update(raw)
         # Sections added after a file was written get their new keys' defaults
-        for section, defaults in (("serenity", default_serenity), ("imaging", default_imaging)):
-            merged[section] = {**defaults(), **(raw.get(section) if isinstance(raw.get(section), dict) else {})}
+        merged["imaging"] = {**default_imaging(), **(raw.get("imaging") if isinstance(raw.get("imaging"), dict) else {})}
+        merged_plugins = plugins.default_plugin_settings()
+        for pid, settings in (raw.get("plugins") or {}).items():
+            if isinstance(settings, dict):
+                merged_plugins[pid] = {**merged_plugins.get(pid, {"enabled": False}), **settings}
+        merged["plugins"] = merged_plugins
         self.data = merged
         self._resolve_secrets(self.data)
         if self.migrated_from:

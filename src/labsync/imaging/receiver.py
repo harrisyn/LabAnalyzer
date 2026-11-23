@@ -4,7 +4,7 @@
   SOP classes in any transfer syntax.
 - Refuses associations whose called AE title isn't ours, and (unless
   "accept unknown nodes" is on) callers that are neither in the local nodes
-  list nor registered in Serenity to send through this LabSync, or that
+  list nor sent down by an integration plugin's platform, or that
   connect from an address other than the one registered.
 - Writes each instance to disk (temp file, fsync, rename) and records it in
   the queue before answering Success, so a stored image is never lost even
@@ -80,7 +80,8 @@ class Receiver:
 
     def allowed_nodes(self) -> list[dict]:
         nodes = [dict(n, source="local") for n in self.config.get("local_nodes") or []]
-        nodes += [dict(n, source="serenity") for n in self.config.get("serenity_nodes") or []]
+        for source, remote in (self.config.get("remote_nodes") or {}).items():
+            nodes += [dict(n, source=source) for n in remote or []]
         return nodes
 
     def is_allowed(self, calling_ae: str, ip: str) -> tuple[bool, str]:
@@ -91,7 +92,7 @@ class Receiver:
         if not matches:
             return False, f"AE title {calling_ae or '(blank)'} is not an allowed device"
         for node in matches:
-            ips = node.get("allowed_ips") if node.get("source") == "serenity" else [node.get("ip") or ""]
+            ips = node.get("allowed_ips") if node.get("source") != "local" else [node.get("ip") or ""]
             ips = [i for i in (ips or []) if str(i).strip()] or [""]
             if any(ip_matches(ip, a) for a in ips):
                 return True, ""
