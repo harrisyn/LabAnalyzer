@@ -569,7 +569,7 @@ class MainWindow:
 
     def _tester(self, dest: dict[str, Any]) -> None:
         self.l_status.configure(text=f"Testing {dest.get('name')}…")
-        fut = self.engine.call(Engine.test_destination(dest))
+        fut = self.engine.call(self.engine.test_destination(dest))
 
         def done(f) -> None:
             try:

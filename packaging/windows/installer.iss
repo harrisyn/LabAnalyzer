@@ -34,7 +34,7 @@ MinVersion=10.0
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "autostart"; Description: "Start LabSync when I sign in (minimised)"; GroupDescription: "Startup:"
-Name: "firewall"; Description: "Allow analyzers on the local network to connect (Windows Firewall rule)"; GroupDescription: "Network:"
+Name: "firewall"; Description: "Allow analyzers and imaging devices on the local network to connect (Windows Firewall rule)"; GroupDescription: "Network:"
 
 [InstallDelete]
 ; 1.x shipped a single-file exe plus a resources folder; remove leftovers before laying down the new build.

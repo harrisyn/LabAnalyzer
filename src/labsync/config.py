@@ -31,7 +31,7 @@ KEYRING_SERVICE = "LabSync"
 SECRET_FIELDS = ("api_key", "token", "password", "client_secret")
 
 TRANSPORT_TYPES = ("tcp_server", "tcp_client", "serial")
-DESTINATION_TYPES = ("http", "fhir", "hl7_mllp", "file")
+DESTINATION_TYPES = ("http", "fhir", "hl7_mllp", "file", "serenity")
 SCHEDULE_MODES = ("realtime", "interval", "cron")
 AUTH_METHODS = ("none", "api_key", "bearer", "basic", "oauth2")
 
@@ -51,6 +51,42 @@ def default_config() -> dict[str, Any]:
         "devices": [],
         "destinations": [],
         "orders": {"provider": "none", "url": "", "timeout": 10, "auth": {"method": "none"}},
+        "serenity": default_serenity(),
+        "imaging": default_imaging(),
+    }
+
+
+def default_serenity() -> dict[str, Any]:
+    """The link to Serenity, filled from the setup code on Serenity's Devices screen."""
+    return {
+        "enabled": True,
+        "url": "",  # Serenity API address with /v2, e.g. https://api.serenity.health/v2
+        "device_key": "",  # sdk_...; kept in the OS credential store
+        "device_id": "",
+        "device_name": "",
+        "organization": "",
+        "ca_bundle": "",  # optional CA bundle for HTTPS-inspecting proxies
+        "heartbeat_seconds": 60,
+    }
+
+
+def default_imaging() -> dict[str, Any]:
+    """The imaging module: a DICOM storage node that forwards images to Serenity."""
+    return {
+        "enabled": False,
+        "ae_title": "SERENITY",  # same as Serenity's own DICOM receiver
+        "port": 11113,  # avoids 104 and 11112, which PACS and PostDICOM commonly use
+        "bind_address": "0.0.0.0",
+        "accept_unknown_nodes": False,
+        "local_nodes": [],  # [{"name", "ae_title", "ip"}] added on site
+        "send_to_serenity": True,
+        "dicom_destinations": [],  # [{"id", "name", "ae_title", "host", "port", "enabled"}]
+        "batch_max_instances": 10,
+        "batch_max_bytes": 40 * 1024 * 1024,  # staging nginx allows a little over 50 MB per request
+        "request_timeout_seconds": 300,
+        "hold_retry_days": 7,
+        "retention_days": 7,  # delivered images are deleted after this; undelivered never
+        "min_free_disk_mb": 2048,  # refuse new images below this much free space
     }
 
 
@@ -72,7 +108,8 @@ def new_device(profile_id: str = "generic_astm", name: str = "", port: int = 500
 def new_destination(dest_type: str = "http", name: str = "") -> dict[str, Any]:
     base: dict[str, Any] = {
         "id": f"dst-{uuid.uuid4().hex[:8]}",
-        "name": name or {"http": "REST endpoint", "fhir": "FHIR server", "hl7_mllp": "LIS (HL7)", "file": "Export folder"}[dest_type],
+        "name": name or {"http": "REST endpoint", "fhir": "FHIR server", "hl7_mllp": "LIS (HL7)", "file": "Export folder",
+                         "serenity": "Serenity"}[dest_type],
         "type": dest_type,
         "enabled": True,
         "schedule": {"mode": "realtime", "interval_minutes": 15, "cron": "0 * * * *"},
@@ -92,6 +129,8 @@ def new_destination(dest_type: str = "http", name: str = "") -> dict[str, Any]:
                      "receiving_facility": "", "sending_facility": ""})
     elif dest_type == "file":
         base.update({"folder": "", "format": "json"})
+    elif dest_type == "serenity":
+        base.update({"name": name or "Serenity", "timeout": 30})
     return base
 
 
@@ -159,6 +198,9 @@ def _secret_slots(cfg: dict[str, Any]):
     for f in SECRET_FIELDS:
         if f in orders_auth:
             yield orders_auth, f, f"orders:{f}"
+    serenity = cfg.get("serenity")
+    if isinstance(serenity, dict) and "device_key" in serenity:
+        yield serenity, "device_key", "serenity:device_key"
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +314,8 @@ def validate(cfg: dict[str, Any]) -> list[str]:
             problems.append(f"destination {name!r}: host is required")
         elif dtype == "file" and not dest.get("folder"):
             problems.append(f"destination {name!r}: folder is required")
+        elif dtype == "serenity" and not ((cfg.get("serenity") or {}).get("url")):
+            problems.append(f"destination {name!r}: connect to Serenity first (Settings, Serenity setup code)")
         sched = dest.get("schedule") or {}
         mode = sched.get("mode", "realtime")
         if mode not in SCHEDULE_MODES:
@@ -284,6 +328,31 @@ def validate(cfg: dict[str, Any]) -> list[str]:
                     raise ValueError
             except (TypeError, ValueError):
                 problems.append(f"destination {name!r}: interval must be a positive number of minutes")
+    problems.extend(_validate_imaging(cfg, listen))
+    return problems
+
+
+def _validate_imaging(cfg: dict[str, Any], listen: dict[tuple[str, int], str]) -> list[str]:
+    img = cfg.get("imaging") or {}
+    if not img.get("enabled"):
+        return []
+    problems: list[str] = []
+    ae = str(img.get("ae_title") or "").strip()
+    if not ae or len(ae) > 16 or "\\" in ae or any(ord(c) < 32 or ord(c) > 126 for c in ae):
+        problems.append("imaging: AE title must be 1-16 plain characters")
+    try:
+        port = int(img.get("port", 0))
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except (TypeError, ValueError):
+        problems.append("imaging: DICOM port must be 1-65535")
+        return problems
+    for (_host, p), name in listen.items():
+        if p == port:
+            problems.append(f"imaging: DICOM port {port} is also used by instrument {name!r}")
+    for d in img.get("dicom_destinations") or []:
+        if not d.get("host") or not d.get("ae_title") or not d.get("port"):
+            problems.append(f"imaging: copy destination {d.get('name') or d.get('id')!r} needs AE title, host and port")
     return problems
 
 
@@ -325,6 +394,9 @@ class ConfigManager:
             log.info("migrated configuration from LabSync 1.x (backup at %s)", backup)
         merged = default_config()
         merged.update(raw)
+        # Sections added after a file was written get their new keys' defaults
+        for section, defaults in (("serenity", default_serenity), ("imaging", default_imaging)):
+            merged[section] = {**defaults(), **(raw.get(section) if isinstance(raw.get(section), dict) else {})}
         self.data = merged
         self._resolve_secrets(self.data)
         if self.migrated_from:

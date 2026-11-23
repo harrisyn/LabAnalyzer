@@ -313,7 +313,71 @@ class FileSender(Sender):
         return f"writable: {folder}"
 
 
-SENDERS: dict[str, type[Sender]] = {"http": HttpSender, "fhir": FhirSender, "hl7_mllp": MllpSender, "file": FileSender}
+# ---------------------------------------------------------------------------
+# Serenity
+# ---------------------------------------------------------------------------
+
+
+class SerenitySender(HttpSender):
+    """Results to Serenity's device gateway (POST {url}/device-gateway/lab-results),
+    authenticated with this LabSync's device key from Serenity's Devices screen.
+
+    The address and key come from the shared Serenity link (Settings), which the
+    engine passes in as ``dest["serenity"]``. The body is the 1.x shape Serenity
+    already reads; ``Idempotency-Key`` (the report id) lets Serenity drop repeats.
+    A refused key keeps results queued instead of parking them: they are sent once
+    a new setup code is entered.
+    """
+
+    def __init__(self, dest: dict[str, Any]):
+        s = dest.get("serenity") or {}
+        base = (s.get("url") or "").rstrip("/")
+        super().__init__({
+            **dest,
+            "url": f"{base}/device-gateway/lab-results" if base else "",
+            "method": "POST",
+            "payload_format": "legacy",
+            "verify_tls": True,
+            "ca_bundle": s.get("ca_bundle", ""),
+            "headers": {},
+            "auth": {"method": "api_key", "header": "X-Device-Key", "api_key": s.get("device_key", "")},
+        })
+        self._ready = bool(base and s.get("device_key") and s.get("enabled", True))
+
+    async def send(self, report: Report, ctx: dict[str, Any]) -> tuple[int | None, str]:
+        if not self._ready:
+            raise DeliveryError("connection error: not connected to Serenity yet (enter the setup code)")
+        try:
+            return await super().send(report, ctx)
+        except DeliveryError as exc:
+            if exc.status in (401, 403):
+                raise DeliveryError("Serenity did not accept the device key; results are kept until a new "
+                                    "setup code is entered", retryable=True, status=exc.status) from exc
+            raise
+
+    async def test(self) -> str:
+        if not self._ready:
+            raise DeliveryError("not connected to Serenity yet (Settings, Serenity setup code)")
+        session = await self._get_session()
+        headers = await self._headers(session)
+        url = self.dest["url"].rsplit("/lab-results", 1)[0] + "/heartbeat"
+        try:
+            async with session.post(url, json={"version": __version__, "report": {"test": True}}, headers=headers,
+                                    ssl=self._ssl) as resp:
+                if resp.status == 401:
+                    raise DeliveryError("Serenity did not accept the device key")
+                if resp.status >= 400:
+                    raise DeliveryError(f"Serenity answered HTTP {resp.status}")
+                data = await resp.json()
+                return f"connected to {(data.get('organization') or {}).get('name', 'Serenity')}"
+        except DeliveryError:
+            raise
+        except Exception as exc:
+            raise DeliveryError(f"{exc.__class__.__name__}: {exc}") from exc
+
+
+SENDERS: dict[str, type[Sender]] = {"http": HttpSender, "fhir": FhirSender, "hl7_mllp": MllpSender, "file": FileSender,
+                                    "serenity": SerenitySender}
 
 
 def make_sender(dest: dict[str, Any]) -> Sender:

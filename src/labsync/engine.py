@@ -1,5 +1,10 @@
 """The integration engine: devices in, storage, destinations out.
 
+Two modules share it: the analyzer engine (devices, outbox, destinations, all
+on this asyncio loop) and the imaging module (a DICOM node with its own
+threads, queue and folder, see ``labsync.imaging``). Both use the one link to
+Serenity (device key and heartbeat, see ``labsync.serenity``).
+
 The engine runs on its own asyncio event loop. The desktop GUI starts it in a
 background thread and talks to it through ``call`` (thread-safe coroutine
 submission) and the ``events`` queue; headless mode runs it in the main
@@ -16,6 +21,7 @@ import logging
 import queue
 import threading
 from collections.abc import Coroutine
+from pathlib import Path
 from typing import Any
 
 from . import __version__
@@ -26,6 +32,7 @@ from .outbound.orders import make_order_source
 from .outbound.senders import make_sender
 from .protocols import handler_for
 from .protocols.base import SessionContext
+from .serenity import HEARTBEAT_SECONDS, SerenityLink, allowed_modalities
 from .storage.db import Database
 from .transport.runner import DeviceRunner, DeviceStatus
 
@@ -33,9 +40,15 @@ log = logging.getLogger("labsync.engine")
 
 
 class Engine:
-    def __init__(self, config: dict[str, Any], db: Database):
+    def __init__(self, config: dict[str, Any], db: Database, imaging_home: Path | None = None):
         self.config = copy.deepcopy(config)
         self.db = db
+        if imaging_home is None and db.path != ":memory:":
+            imaging_home = Path(db.path).parent / "imaging"
+        self.imaging_home = imaging_home
+        self.imaging = None  # ImagingService, created when the imaging module is first switched on
+        self.serenity = SerenityLink(self.config.get("serenity") or {})
+        self._heartbeat: asyncio.Task | None = None
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=10000)
         self.loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -95,26 +108,28 @@ class Engine:
         if self.running:
             return
         self.running = True
+        await self._start_lab()
+        await self._sync_imaging()
+        self._heartbeat = asyncio.create_task(self._heartbeat_loop(), name="serenity-heartbeat")
+        self._housekeeping = asyncio.create_task(self._housekeeping_loop())
+        log.info("engine started: %d device(s), %d destination(s), imaging %s", len(self.runners),
+                 len(self.workers), "on" if self.imaging_on else "off")
+        self._publish("engine", "started")
+
+    async def _start_lab(self) -> None:
         self.db.reset_inflight()
         self._orders = make_order_source(self.config.get("orders"))
         for dest in self.config.get("destinations", []):
             if dest.get("enabled", True):
-                worker = DestinationWorker(dest, self.db, self._device_context, self._delivery_updated)
+                worker = DestinationWorker(self._sender_config(dest), self.db, self._device_context,
+                                           self._delivery_updated)
                 self.workers[dest["id"]] = worker
                 worker.start()
         for dev in self.config.get("devices", []):
             if dev.get("enabled", True):
                 await self._start_device(dev)
-        self._housekeeping = asyncio.create_task(self._housekeeping_loop())
-        log.info("engine started: %d device(s), %d destination(s)", len(self.runners), len(self.workers))
-        self._publish("engine", "started")
 
-    async def stop(self) -> None:
-        if not self.running:
-            return
-        self.running = False
-        if self._housekeeping is not None:
-            self._housekeeping.cancel()
+    async def _stop_lab(self) -> None:
         for runner in list(self.runners.values()):
             with contextlib.suppress(Exception):
                 await runner.stop()
@@ -123,15 +138,116 @@ class Engine:
                 await worker.stop()
         self.runners.clear()
         self.workers.clear()
+
+    def _sender_config(self, dest: dict[str, Any]) -> dict[str, Any]:
+        """A Serenity destination takes its address and key from the shared Serenity link."""
+        if dest.get("type") == "serenity":
+            return {**dest, "serenity": copy.deepcopy(self.config.get("serenity") or {})}
+        return dest
+
+    async def stop(self) -> None:
+        if not self.running:
+            return
+        self.running = False
+        for task in (self._housekeeping, self._heartbeat):
+            if task is not None:
+                task.cancel()
+        await self._stop_lab()
+        if self.imaging is not None and self.imaging.running:
+            await asyncio.get_running_loop().run_in_executor(None, self.imaging.stop)
         log.info("engine stopped")
         self._publish("engine", "stopped")
 
     async def apply_config(self, config: dict[str, Any]) -> None:
-        was_running = self.running
-        await self.stop()
+        """Apply a new configuration. The analyzer side restarts; the imaging module only
+        restarts the parts whose settings changed, so a lab change never drops a DICOM transfer."""
+        old_serenity = self.config.get("serenity")
+        if not self.running:
+            self.config = copy.deepcopy(config)
+            self.serenity.settings = self.config.get("serenity") or {}
+            return
+        await self._stop_lab()
         self.config = copy.deepcopy(config)
-        if was_running:
-            await self.start()
+        self.serenity.settings = self.config.get("serenity") or {}
+        await self._start_lab()
+        await self._sync_imaging()
+        if self.config.get("serenity") != old_serenity:
+            asyncio.create_task(self.heartbeat_once())
+        self._publish("engine", "started")
+
+    # ------------------------------------------------------------------ imaging
+    @property
+    def imaging_on(self) -> bool:
+        return bool(self.imaging is not None and self.imaging.running)
+
+    async def _sync_imaging(self) -> None:
+        """Start, stop or reconfigure the imaging module to match the configuration."""
+        wanted = bool((self.config.get("imaging") or {}).get("enabled")) and self.imaging_home is not None
+        loop = asyncio.get_running_loop()
+        if wanted and self.imaging is None:
+            from .imaging.service import ImagingService  # pynetdicom is only loaded when imaging is used
+
+            self.imaging = await loop.run_in_executor(None, ImagingService, self.config, self.imaging_home)
+            self.imaging.on_change = lambda: self._publish_threadsafe("imaging", None)
+        if self.imaging is None:
+            return
+        await loop.run_in_executor(None, self.imaging.reconfigure, self.config)
+        if wanted and not self.imaging.running:
+            await loop.run_in_executor(None, self.imaging.start)
+        elif not wanted and self.imaging.running:
+            await loop.run_in_executor(None, self.imaging.stop)
+        self._publish("imaging", None)
+
+    def _publish_threadsafe(self, kind: str, data: Any = None) -> None:
+        # queue.Queue is thread-safe; _publish only touches it
+        self._publish(kind, data)
+
+    async def retry_imaging(self, study_instance_uid: str | None = None) -> int:
+        if self.imaging is None:
+            return 0
+        return await asyncio.get_running_loop().run_in_executor(None, self.imaging.retry, study_instance_uid)
+
+    def imaging_status(self) -> dict[str, Any] | None:
+        return self.imaging.status() if self.imaging is not None else None
+
+    # ------------------------------------------------------------------ Serenity
+    def serenity_report(self) -> dict[str, Any]:
+        lab = {
+            "devices": [
+                {"id": k, "name": r.name, "state": r.status.state, "detail": r.status.detail,
+                 "messages": r.status.messages, "last_message_at": r.status.last_message_at}
+                for k, r in self.runners.items()
+            ],
+            "outbox": self.db.outbox_stats(),
+        }
+        report: dict[str, Any] = {"lab": lab}
+        if self.imaging_on:
+            report["imaging"] = self.imaging.report()
+            # Kept at the top level too: Serenity's Devices screen reads the queue size from here
+            report.update({k: report["imaging"][k] for k in ("queued", "held", "failed", "received_24h",
+                                                              "listening", "listener_error")})
+        return report
+
+    async def heartbeat_once(self) -> None:
+        loop = asyncio.get_running_loop()
+        report = self.serenity_report()
+        answer = await loop.run_in_executor(None, self.serenity.heartbeat, report)
+        if answer is not None and self.imaging is not None:
+            nodes = allowed_modalities(answer)
+            if nodes is not None:
+                await loop.run_in_executor(None, self.imaging.set_serenity_nodes, nodes)
+        self._publish("serenity", dict(self.serenity.state))
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            try:
+                await self.heartbeat_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Serenity heartbeat failed")
+            seconds = int((self.config.get("serenity") or {}).get("heartbeat_seconds") or HEARTBEAT_SECONDS)
+            await asyncio.sleep(max(10, seconds))
 
     async def restart_device(self, device_id: str) -> None:
         runner = self.runners.pop(device_id, None)
@@ -281,9 +397,8 @@ class Engine:
         w = self.workers.get(destination_id)
         return await w.drain() if w else 0
 
-    @staticmethod
-    async def test_destination(dest: dict[str, Any]) -> str:
-        sender = make_sender(dest)
+    async def test_destination(self, dest: dict[str, Any]) -> str:
+        sender = make_sender(self._sender_config(dest))
         try:
             return await sender.test()
         finally:
