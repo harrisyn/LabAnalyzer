@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import tkinter as tk
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
@@ -12,9 +13,10 @@ from typing import Any
 
 from croniter import croniter
 
-from ..config import AUTH_METHODS, new_destination, validate
+from ..config import AUTH_METHODS, default_imaging, default_serenity, new_destination, validate
 from ..devices.catalog import PROFILES, find_profile
 from ..protocols import PROTOCOL_LABELS
+from ..serenity import apply_setup_code, check_serenity_url
 from ..transport.runner import list_serial_ports
 from .common import PAD, Form, center_on
 
@@ -259,9 +261,13 @@ class DestinationDialog(_Dialog):
         f.add("Name", ttk.Entry(f, textvariable=self.v_name, width=48))
         self.v_type = tk.StringVar(value=self.dest.get("type", "http"))
         types = ttk.Combobox(f, textvariable=self.v_type, state="readonly",
-                             values=["http", "fhir", "hl7_mllp", "file"], width=14)
+                             values=["serenity", "http", "fhir", "hl7_mllp", "file"], width=14)
         types.bind("<<ComboboxSelected>>", lambda e: self._type_changed())
-        f.add("Type", types, hint="http: REST/JSON API · fhir: FHIR R4 server · hl7_mllp: LIS/HIS over HL7 · file: drop folder")
+        f.add("Type", types, hint="serenity: Serenity, with the device key from Settings · http: REST/JSON API · "
+                                  "fhir: FHIR R4 server · hl7_mllp: LIS/HIS over HL7 · file: drop folder")
+        f.add("", ttk.Label(f, style="Hint.TLabel", wraplength=420, justify="left",
+                            text="Results go to Serenity's device gateway with this computer's device key. "
+                                 "Connect to Serenity under Settings first (paste the setup code)."), key="serenity")
         self.v_enabled = tk.BooleanVar(value=self.dest.get("enabled", True))
         f.add("", ttk.Checkbutton(f, text="Enabled", variable=self.v_enabled))
 
@@ -390,6 +396,7 @@ class DestinationDialog(_Dialog):
             self.f.show(k, t == "hl7_mllp")
         for k in ("folder", "ffmt"):
             self.f.show(k, t == "file")
+        self.f.show("serenity", t == "serenity")
 
     def _auth_changed(self) -> None:
         m = self.v_auth.get()
@@ -502,8 +509,10 @@ class SettingsDialog(_Dialog):
     def __init__(self, parent: tk.Misc, cfg: dict[str, Any], keyring_available: bool):
         super().__init__(parent, "Settings")
         self.cfg = copy.deepcopy(cfg)
-        f = Form(self.body)
-        f.pack(fill="both", expand=True)
+        nb = ttk.Notebook(self.body)
+        nb.pack(fill="both", expand=True)
+        f = Form(nb, padding=PAD)
+        nb.add(f, text="General")
         self.v_app = tk.StringVar(value=cfg.get("app_name", "LabSync"))
         f.add("Window title", ttk.Entry(f, textvariable=self.v_app, width=40))
         self.v_inst = tk.StringVar(value=cfg.get("instance_id", ""))
@@ -528,7 +537,31 @@ class SettingsDialog(_Dialog):
         self.v_ret = tk.StringVar(value=str(cfg.get("retention_days", 0)))
         f.add("Keep data (days)", ttk.Entry(f, textvariable=self.v_ret, width=8),
               hint="0 keeps everything. Undelivered results are never purged.")
-        f.section("Order queries (instrument asks the host for a worklist)")
+        f = Form(nb, padding=PAD)
+        nb.add(f, text="Serenity")
+        serenity = cfg.get("serenity") or {}
+        connected = bool(serenity.get("url") and serenity.get("device_key"))
+        self.l_serenity = ttk.Label(f, style="Hint.TLabel", wraplength=420, justify="left", text=(
+            f"Connected as {serenity.get('device_name') or 'this device'} for "
+            f"{serenity.get('organization') or 'your organisation'}." if connected else
+            "Not connected. In Serenity open Devices, register a Serenity communicator and paste its setup code here."))
+        f.add("Status", self.l_serenity)
+        self.v_code = tk.StringVar()
+        f.add("Setup code", ttk.Entry(f, textvariable=self.v_code, show="•"),
+              hint="SRN1.… from Serenity's Devices screen. Pasting a new code replaces the current key.")
+        self.v_surl = tk.StringVar(value=serenity.get("url", ""))
+        f.add("Serenity address", ttk.Entry(f, textvariable=self.v_surl),
+              hint="Filled from the setup code, e.g. https://api.serenity.health/v2. Change it only for another "
+                   "Serenity environment.")
+        self.v_sca = tk.StringVar(value=serenity.get("ca_bundle", ""))
+        f.add("Extra CA file", ttk.Entry(f, textvariable=self.v_sca),
+              hint="Optional PEM file when a proxy inspects HTTPS traffic.")
+        self.v_sdisc = tk.BooleanVar(value=False)
+        if connected:
+            f.add("", ttk.Checkbutton(f, text="Disconnect from Serenity (forget the device key)", variable=self.v_sdisc))
+        f = Form(nb, padding=PAD)
+        nb.add(f, text="Order queries")
+        f.section("Instrument asks the host for a worklist")
         orders = cfg.get("orders") or {}
         self.v_oprov = tk.StringVar(value=orders.get("provider", "none"))
         f.add("Source", ttk.Combobox(f, textvariable=self.v_oprov, values=["none", "http"], state="readonly", width=8),
@@ -560,4 +593,123 @@ class SettingsDialog(_Dialog):
                        if self.v_okey.get() else {"method": "none"}}
         if c["orders"]["provider"] == "http" and not c["orders"]["url"].startswith(("http://", "https://")):
             raise ValueError("Order lookup URL must start with http:// or https://")
+        serenity = {**default_serenity(), **(c.get("serenity") or {})}
+        if self.v_sdisc.get():
+            serenity.update(url="", device_key="", device_id="", device_name="", organization="")
+        elif self.v_code.get().strip():
+            serenity = apply_setup_code({"serenity": serenity}, self.v_code.get())["serenity"]
+        elif self.v_surl.get().strip() != serenity.get("url", ""):
+            serenity["url"] = check_serenity_url(self.v_surl.get()) if self.v_surl.get().strip() else ""
+        serenity["ca_bundle"] = self.v_sca.get().strip()
+        c["serenity"] = serenity
+        return c
+
+
+# ---------------------------------------------------------------------------
+# Imaging
+# ---------------------------------------------------------------------------
+
+
+def _parse_rows(text: str, fields: tuple[str, ...], required: int, what: str) -> list[dict[str, str]]:
+    rows = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < required or len(parts) > len(fields):
+            raise ValueError(f"{what}, line {n}: expected {', '.join(fields[:required])}"
+                             + (f" (optional {', '.join(fields[required:])})" if len(fields) > required else ""))
+        rows.append(dict(zip(fields, parts + [""] * (len(fields) - len(parts)), strict=True)))
+    return rows
+
+
+class ImagingDialog(_Dialog):
+    """The imaging module: a DICOM node that modalities send to; images go on to Serenity."""
+
+    def __init__(self, parent: tk.Misc, cfg: dict[str, Any]):
+        super().__init__(parent, "Imaging (DICOM) settings")
+        self.cfg = copy.deepcopy(cfg)
+        img = {**default_imaging(), **(cfg.get("imaging") or {})}
+        nb = ttk.Notebook(self.body)
+        nb.pack(fill="both", expand=True)
+        f = Form(nb, padding=PAD)
+        nb.add(f, text="DICOM node")
+        self.v_on = tk.BooleanVar(value=bool(img.get("enabled")))
+        f.add("", ttk.Checkbutton(f, text="Receive images from imaging devices (CT, MRI, X-ray, ultrasound)",
+                                  variable=self.v_on))
+        f.section("This computer as a DICOM node")
+        self.v_ae = tk.StringVar(value=img.get("ae_title", "SERENITY"))
+        f.add("AE title", ttk.Entry(f, textvariable=self.v_ae, width=18),
+              hint="What imaging devices send to. SERENITY matches Serenity's own DICOM receiver.")
+        self.v_port = tk.StringVar(value=str(img.get("port", 11113)))
+        f.add("Port", ttk.Entry(f, textvariable=self.v_port, width=8),
+              hint="11113 avoids 104 and 11112, which PACS and the PostDICOM communicator often use.")
+        self.v_bind = tk.StringVar(value=img.get("bind_address", "0.0.0.0"))
+        f.add("Listen on", ttk.Entry(f, textvariable=self.v_bind, width=18),
+              hint="0.0.0.0 for every network card, or this computer's LAN address only.")
+        f = Form(nb, padding=PAD)
+        nb.add(f, text="Devices and copies")
+        f.section("Who may send")
+        self.v_any = tk.BooleanVar(value=bool(img.get("accept_unknown_nodes")))
+        f.add("", ttk.Checkbutton(f, text="Accept any device (not recommended)", variable=self.v_any))
+        self.t_nodes = tk.Text(f, height=4, width=56, font=("TkFixedFont", 9))
+        self.t_nodes.insert("1.0", "\n".join(f"{n.get('name', '')}, {n.get('ae_title', '')}, {n.get('ip', '')}".rstrip(", ")
+                                             for n in img.get("local_nodes") or []))
+        f.add("Devices added here", self.t_nodes,
+              hint="One per line: name, AE title, IP or range (optional). Devices registered in Serenity to send "
+                   "through this computer are added automatically.")
+        f.section("Where images go")
+        self.v_ser = tk.BooleanVar(value=bool(img.get("send_to_serenity", True)))
+        f.add("", ttk.Checkbutton(f, text="Send to Serenity (uses the device key from Settings)", variable=self.v_ser))
+        self.t_dest = tk.Text(f, height=3, width=56, font=("TkFixedFont", 9))
+        self.t_dest.insert("1.0", "\n".join(f"{d.get('name', '')}, {d.get('ae_title', '')}, {d.get('host', '')}, {d.get('port', '')}"
+                                            for d in img.get("dicom_destinations") or []))
+        f.add("Also copy to", self.t_dest,
+              hint="Other DICOM nodes, one per line: name, AE title, host, port (for example the PostDICOM "
+                   "communicator, for devices that can only send to one place).")
+        f = Form(nb, padding=PAD)
+        nb.add(f, text="Disk")
+        self.v_keep = tk.StringVar(value=str(img.get("retention_days", 7)))
+        f.add("Keep delivered images (days)", ttk.Entry(f, textvariable=self.v_keep, width=8),
+              hint="Images not yet delivered everywhere are never deleted.")
+        self.v_free = tk.StringVar(value=str(img.get("min_free_disk_mb", 2048)))
+        f.add("Stop receiving below (MB free)", ttk.Entry(f, textvariable=self.v_free, width=8),
+              hint="Devices are told 'out of resources' and send again later.")
+        self.v_hold = tk.StringVar(value=str(img.get("hold_retry_days", 7)))
+        f.add("Wait for a matching order (days)", ttk.Entry(f, textvariable=self.v_hold, width=8))
+        self.finish_layout()
+
+    def collect(self) -> dict[str, Any]:
+        c = self.cfg
+        img = {**default_imaging(), **(c.get("imaging") or {})}
+        try:
+            port = int(self.v_port.get())
+            keep, free, hold = float(self.v_keep.get()), int(self.v_free.get()), float(self.v_hold.get())
+        except ValueError as exc:
+            raise ValueError("Port, days and MB must be numbers.") from exc
+        nodes = _parse_rows(self.t_nodes.get("1.0", "end"), ("name", "ae_title", "ip"), 2, "Devices added here")
+        for n in nodes:
+            n["ae_title"] = n["ae_title"].upper()
+        old = {(d.get("ae_title"), d.get("host"), str(d.get("port"))): d for d in img.get("dicom_destinations") or []}
+        dests = []
+        for row in _parse_rows(self.t_dest.get("1.0", "end"), ("name", "ae_title", "host", "port"), 4, "Also copy to"):
+            try:
+                row_port = int(row["port"])
+            except ValueError as exc:
+                raise ValueError(f"Also copy to: port {row['port']!r} must be a number") from exc
+            prev = old.get((row["ae_title"].upper(), row["host"], row["port"]), {})
+            dests.append({"id": prev.get("id") or f"dcm-{uuid.uuid4().hex[:6]}", "name": row["name"],
+                          "ae_title": row["ae_title"].upper(), "host": row["host"], "port": row_port, "enabled": True})
+        img.update(enabled=bool(self.v_on.get()), ae_title=self.v_ae.get().strip().upper(), port=port,
+                   bind_address=self.v_bind.get().strip() or "0.0.0.0", accept_unknown_nodes=bool(self.v_any.get()),
+                   local_nodes=nodes, send_to_serenity=bool(self.v_ser.get()), dicom_destinations=dests,
+                   retention_days=keep, min_free_disk_mb=free, hold_retry_days=hold)
+        c["imaging"] = img
+        problems = [p for p in validate(c) if p.startswith("imaging")]
+        if problems:
+            raise ValueError("\n".join(problems))
+        if img["enabled"] and img["send_to_serenity"] and not (c.get("serenity") or {}).get("url"):
+            messagebox.showinfo("Serenity not connected",
+                                "Images will be kept on this computer until you connect to Serenity "
+                                "(Settings, setup code).", parent=self)
         return c

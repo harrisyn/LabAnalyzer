@@ -23,7 +23,7 @@ from ..logging_setup import log_feed
 from ..storage.db import Database
 from ..transport.runner import DeviceStatus
 from .common import PAD, local_ts, make_tree, replace_rows
-from .dialogs import DestinationDialog, DeviceDialog, SettingsDialog
+from .dialogs import DestinationDialog, DeviceDialog, ImagingDialog, SettingsDialog
 from .tray import Tray
 from .viewers import RawMessageWindow, ReportWindow
 
@@ -75,7 +75,7 @@ class MainWindow:
         self.cfg = mgr.snapshot()
         self.statuses: dict[str, DeviceStatus] = {}
         self.quitting = False
-        self._dirty = {"results": True, "delivery": True, "messages": True}
+        self._dirty = {"results": True, "delivery": True, "messages": True, "imaging": True}
 
         root.title(self.cfg.get("app_name", "LabSync"))
         root.geometry("1240x760")
@@ -147,20 +147,24 @@ class MainWindow:
         self.b_engine = ttk.Button(header, text="Stop receiving", command=self.toggle_engine)
         self.b_engine.pack(side="right")
 
+        # The status bar is packed before the notebook so a small window never squeezes it out
+        status = ttk.Frame(r, padding=(PAD * 2, 2))
+        status.pack(fill="x", side="bottom")
+        self.l_status = ttk.Label(status, text="", style="Hint.TLabel")
+        self.l_status.pack(side="left")
+        self.l_serenity = ttk.Label(status, text="", style="Hint.TLabel")
+        self.l_serenity.pack(side="left", padx=PAD * 2)
+        ttk.Label(status, text=f"LabSync {__version__} · data: {paths.app_home()}", style="Hint.TLabel").pack(side="right")
+
         self.nb = ttk.Notebook(r)
         self.nb.pack(fill="both", expand=True, padx=PAD * 2, pady=(0, PAD))
         self._build_devices()
+        self._build_imaging()
         self._build_results()
         self._build_delivery()
         self._build_messages()
         self._build_log()
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self._refresh_current())
-
-        status = ttk.Frame(r, padding=(PAD * 2, 2))
-        status.pack(fill="x", side="bottom")
-        self.l_status = ttk.Label(status, text="", style="Hint.TLabel")
-        self.l_status.pack(side="left")
-        ttk.Label(status, text=f"LabSync {__version__} · data: {paths.app_home()}", style="Hint.TLabel").pack(side="right")
 
     def _toolbar(self, parent: tk.Misc, buttons: list[tuple[str, Any]]) -> ttk.Frame:
         bar = ttk.Frame(parent)
@@ -191,6 +195,27 @@ class MainWindow:
         self.l_empty_dev = ttk.Label(tab, style="Hint.TLabel",
                                      text="No instruments yet. Click 'Add instrument', pick the analyzer model and how it is "
                                           "connected (network or serial).")
+
+    def _build_imaging(self) -> None:
+        tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text="Imaging")
+        self._toolbar(tab, [("Imaging settings…", self.edit_imaging), ("|", None),
+                            ("Retry selected study", self.retry_imaging_selected),
+                            ("Retry all waiting", lambda: self.retry_imaging(None))])
+        head = ttk.Frame(tab)
+        head.pack(fill="x", pady=(0, PAD))
+        self.l_img_state = ttk.Label(head, text="", wraplength=1100, justify="left")
+        self.l_img_state.pack(anchor="w")
+        self.l_img_queue = ttk.Label(head, text="", style="Hint.TLabel", wraplength=1100, justify="left")
+        self.l_img_queue.pack(anchor="w")
+        holder = ttk.Frame(tab)
+        holder.pack(fill="both", expand=True)
+        self.t_img = make_tree(holder, [
+            ("time", "Received", 160), ("patient", "Patient", 180), ("accession", "Accession", 110),
+            ("modality", "Modality", 70), ("desc", "Study", 180), ("from", "From", 110), ("images", "Images", 60),
+            ("serenity", "Serenity", 120), ("copies", "Copies", 100), ("problem", "Problem", 320)])
+        self.t_img.tag_configure("problem", foreground="#b3261e")
+        self.t_img.tag_configure("waiting", foreground="#b45309")
 
     def _build_results(self) -> None:
         tab = ttk.Frame(self.nb)
@@ -320,6 +345,8 @@ class MainWindow:
                     self._dirty["results"] = True
                 elif kind == "engine":
                     self._update_engine_button()
+                elif kind in ("imaging", "serenity"):
+                    self._dirty["imaging"] = True
         except Exception:
             pass
         if changed_devices:
@@ -338,13 +365,15 @@ class MainWindow:
             self.root.after(2000, self._periodic)
 
     def _refresh_current(self) -> None:
-        idx = self.nb.index(self.nb.select())
-        if idx == 1 and self._dirty["results"]:
+        tab = self.nb.tab(self.nb.select(), "text")
+        if tab == "Results" and self._dirty["results"]:
             self.refresh_results()
-        elif idx == 2 and self._dirty["delivery"]:
+        elif tab == "Delivery" and self._dirty["delivery"]:
             self.refresh_delivery()
-        elif idx == 3 and self._dirty["messages"]:
+        elif tab == "Messages" and self._dirty["messages"]:
             self.refresh_messages()
+        elif tab == "Imaging":
+            self.refresh_imaging()  # queue states change on their own (retries, holds), so always refresh
 
     def _drain_log(self) -> None:
         feed = log_feed()
@@ -373,6 +402,17 @@ class MainWindow:
         self.b_engine.configure(text="Stop receiving" if self.engine.running else "Start receiving",
                                 style="TButton" if self.engine.running else "Accent.TButton")
         self.l_status.configure(text="Receiving" if self.engine.running else "Stopped: instruments are not being read")
+        st = self.engine.serenity.state
+        serenity = self.cfg.get("serenity") or {}
+        if not (serenity.get("url") and serenity.get("device_key")):
+            text = "Serenity: not connected (Settings, setup code)"
+        elif st.get("ok"):
+            text = f"Serenity: connected ({st.get('organization') or serenity.get('organization') or 'OK'})"
+        elif st.get("ok") is False:
+            text = f"Serenity: {st.get('error')}"
+        else:
+            text = "Serenity: checking…"
+        self.l_serenity.configure(text=text, foreground="#b3261e" if st.get("ok") is False else "")
 
     def _update_kpis(self) -> None:
         devices = [d for d in self.cfg.get("devices", []) if d.get("enabled", True)]
@@ -470,7 +510,7 @@ class MainWindow:
             mode = sched.get("mode", "realtime")
             sched_text = "Real-time" if mode == "realtime" else (
                 f"Every {sched.get('interval_minutes')} min" if mode == "interval" else f"cron {sched.get('cron')}")
-            target = d.get("url") or (f"{d.get('host')}:{d.get('port')}" if d.get("type") == "hl7_mllp" else d.get("folder", ""))
+            target = "Serenity device gateway" if d.get("type") == "serenity" else d.get("url") or (f"{d.get('host')}:{d.get('port')}" if d.get("type") == "hl7_mllp" else d.get("folder", ""))
             tags = ("disabled",) if not d.get("enabled", True) else ("failed",) if st.get("failed") else ()
             rows.append((d["id"], (d.get("name"), d.get("type"), target, sched_text, st.get("pending", 0),
                                    st.get("sent", 0), st.get("failed", 0), st.get("last_error", "")), tags))
@@ -481,6 +521,82 @@ class MainWindow:
                                           f["specimen_id"] or "", self._device_name(f["device_id"]), f["attempts"],
                                           f["response_code"] or "", f["last_error"] or ""), ()))
         replace_rows(self.t_fail, failed)
+
+    def refresh_imaging(self) -> None:
+        self._dirty["imaging"] = False
+        img_cfg = self.cfg.get("imaging") or {}
+        status = self.engine.imaging_status()
+        if not img_cfg.get("enabled") or status is None or not status["running"]:
+            self.l_img_state.configure(
+                text="Imaging is off. Open 'Imaging settings…' to receive images from CT, MRI, X-ray and ultrasound "
+                     "devices and send them to Serenity.", foreground="")
+            self.l_img_queue.configure(text="")
+            if status is None:
+                replace_rows(self.t_img, [])
+                return
+        elif status["error"]:
+            self.l_img_state.configure(text=status["error"], foreground="#b3261e")
+        else:
+            host, port = status["listening_on"] or ("", img_cfg.get("port"))
+            nodes = status["allowed_nodes"]
+            self.l_img_state.configure(
+                foreground="#15803d",
+                text=f"Listening as {img_cfg.get('ae_title')} on port {port}. "
+                     f"{len(nodes)} device(s) allowed"
+                     + (f" ({', '.join(sorted({n.get('ae_title', '') for n in nodes})[:6])})" if nodes else "")
+                     + (". Accepting any device." if img_cfg.get("accept_unknown_nodes") else "."))
+        if status is not None:
+            totals = status["counts"]["totals"]
+            parts = [f"{status['counts']['received_24h']} image(s) in the last 24 h",
+                     f"{totals['pending'] + totals['sending']} waiting to send", f"{totals['held']} waiting for an order",
+                     f"{totals['failed']} failed"]
+            for d in status["destinations"]:
+                if d["last_error"]:
+                    parts.append(f"{d['name']}: {d['last_error']}")
+            if status.get("last_refused"):
+                parts.append(f"Last refused: {status['last_refused']}")
+            self.l_img_queue.configure(text=" · ".join(parts))
+        rows = []
+        for st in self.engine.imaging.store.recent_studies(limit=200):
+            dests = st["destinations"]
+            ser = dests.get("serenity", {"counts": {}})
+            copies = {k: v for k, v in dests.items() if k != "serenity"}
+
+            def summary(entry: dict[str, Any]) -> str:
+                c = entry["counts"]
+                if c.get("failed"):
+                    return f"failed ({c['failed']})"
+                if c.get("held"):
+                    return "waiting for order"
+                if c.get("pending") or c.get("sending"):
+                    return "sending"
+                return "delivered" if c.get("done") else ""
+
+            problem = next((e["last_error"] for e in dests.values() if e.get("last_error")), "") or ""
+            ser_text = summary(ser) if "serenity" in dests else "–"
+            copy_text = ", ".join(sorted({summary(e) for e in copies.values()})) if copies else "–"
+            states_ = {k for e in dests.values() for k in e["counts"]}
+            tags = ("problem",) if "failed" in states_ else ("waiting",) if states_ & {"held", "pending", "sending"} else ()
+            rows.append((st["study_instance_uid"] or "unknown", (
+                datetime.fromtimestamp(st["last_received"]).strftime("%Y-%m-%d %H:%M:%S"), st["patient_name"] or "",
+                st["accession_number"] or "", st["modality"] or "", st["study_description"] or "",
+                st["calling_ae"] or "", st["instances"], ser_text, copy_text, problem), tags))
+        replace_rows(self.t_img, rows)
+
+    def edit_imaging(self) -> None:
+        dlg = ImagingDialog(self.root, self.cfg)
+        self.root.wait_window(dlg)
+        if dlg.result and self._commit(dlg.result):
+            self.root.after(800, self.refresh_imaging)
+
+    def retry_imaging_selected(self) -> None:
+        sel = self._selected(self.t_img)
+        if sel:
+            self.retry_imaging(sel)
+
+    def retry_imaging(self, study_uid: str | None) -> None:
+        fut = self.engine.call(self.engine.retry_imaging(study_uid))
+        fut.add_done_callback(lambda f: self.root.after(500, self.refresh_imaging))
 
     def refresh_messages(self) -> None:
         self._dirty["messages"] = False

@@ -314,7 +314,7 @@ def validate(cfg: dict[str, Any]) -> list[str]:
             problems.append(f"destination {name!r}: host is required")
         elif dtype == "file" and not dest.get("folder"):
             problems.append(f"destination {name!r}: folder is required")
-        elif dtype == "serenity" and not ((cfg.get("serenity") or {}).get("url")):
+        elif dtype == "serenity" and "serenity" in cfg and not ((cfg.get("serenity") or {}).get("url")):
             problems.append(f"destination {name!r}: connect to Serenity first (Settings, Serenity setup code)")
         sched = dest.get("schedule") or {}
         mode = sched.get("mode", "realtime")

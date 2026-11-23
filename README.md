@@ -41,6 +41,12 @@ It runs as a desktop app on Windows and macOS (and headless on any OS).
 - **Operations**: live instrument status, results browser with search, delivery queue with retry, raw message
   viewer (text and hex), rolling logs, single-instance guard, tray icon on Windows, auto-start, and a
   checksum-verified updater.
+- **Imaging (DICOM)**: an optional DICOM storage node for CT, MRI, X-ray and ultrasound devices. Every image is
+  written to disk before the device is told "Success", then sent to Serenity (and, optionally, copied to other
+  DICOM nodes such as the PostDICOM communicator), retrying until it arrives. See [docs/IMAGING.md](docs/IMAGING.md).
+- **Serenity**: one setup code from Serenity's Devices screen connects this computer. The same device key sends
+  analyzer results (destination type **Serenity**) and images, and a heartbeat reports status and downloads which
+  imaging devices may send here.
 
 See [docs/DEVICES.md](docs/DEVICES.md) for the instrument catalog (about 50 profiles across Sysmex, Mindray,
 Roche, Abbott, Siemens, Beckman Coulter, QuidelOrtho, HORIBA, Snibe, Bio-Rad, Tosoh, Stago, Werfen,
@@ -74,6 +80,16 @@ Python 3.11+ with Tk is required for the GUI.
 3. **Destinations -> Add**: choose REST, FHIR, HL7 or folder, enter the URL and credentials, press **Test**.
 4. Results appear on the **Results** tab as they arrive; **Delivery** shows what is queued, sent or failed.
 
+### With Serenity
+
+1. In Serenity open **Devices**, **Register a device**, **Serenity communicator**, and copy the setup code.
+2. In LabSync open **Settings**, **Serenity**, paste the setup code and save. The status bar shows
+   "Serenity: connected".
+3. For analyzer results add a destination of type **serenity** (no URL or key to enter).
+4. For images open **Imaging**, **Imaging settings…**, tick **Receive images**, and point each imaging device at
+   this computer (AE title `SERENITY`, port `11113`). Devices registered in Serenity with "Sends through" set to
+   this LabSync are allowed automatically.
+
 ### Data folder
 
 | OS | Location |
@@ -83,7 +99,7 @@ Python 3.11+ with Tk is required for the GUI.
 | Linux | `~/.local/share/labsync` |
 
 Override with `--home <folder>` or `LABSYNC_HOME`. It holds `config.json`, `data/labsync.db`, `logs/` and
-`exports/`.
+`exports/`, and with imaging on, `data/imaging/` (`imaging.db`, `images/`, `state.json`).
 
 ### Command line
 
