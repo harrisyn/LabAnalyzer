@@ -38,16 +38,27 @@ BAUD_RATES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200
 
 class _Dialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, title: str):
+        # Dim what's behind first, so the dialog stacks above the dimmed layer
+        self.scrim = theme.Scrim(parent)
         super().__init__(parent)
+        self.scrim.dialog = self
         self.title(title)
-        self.transient(parent.winfo_toplevel())
+        self.transient(self.scrim.owner())
         self.resizable(True, True)
         self.result: Any = None
-        self.body = ttk.Frame(self, padding=PAD * 2)
+        # A hairline in the accent colour and the title in the window itself: a dialog never blends
+        # into the window behind it, even where the title bar is plain
+        self.configure(highlightthickness=1, highlightbackground=theme.color("accent"),
+                       highlightcolor=theme.color("accent"))
+        head = ttk.Frame(self, padding=(PAD * 2, PAD * 2, PAD * 2, 0))
+        head.pack(fill="x")
+        ttk.Label(head, text=title, style="DialogTitle.TLabel").pack(side="left")
+        self.body = ttk.Frame(self, padding=(PAD * 2, PAD * 1.5, PAD * 2, PAD * 2))
         self.body.pack(fill="both", expand=True)
         self.buttons = ttk.Frame(self, padding=(PAD * 2, 0, PAD * 2, PAD * 2))
         self.buttons.pack(fill="x")
         self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Destroy>", lambda e: self.scrim.close() if e.widget is self else None, add="+")
 
     def finish_layout(self, ok_text: str = "Save") -> None:
         ttk.Button(self.buttons, text="Cancel", command=self.destroy).pack(side="right")
@@ -55,6 +66,7 @@ class _Dialog(tk.Toplevel):
         self.configure(background=theme.color("bg"))
         center_on(self, self.master)
         theme.window_chrome(self)
+        self.scrim.keep_below(self)
         self.grab_set()
         self.focus_set()
 

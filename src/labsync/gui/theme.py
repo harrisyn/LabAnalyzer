@@ -244,6 +244,8 @@ def apply(root: tk.Tk, requested: str = "system") -> str:
     style.configure("Value.TLabel", font=FONTS["strong"], background=p["bg"])
     style.configure("Title.TLabel", font=FONTS["title"], background=p["bg"], foreground=p["text"])
     style.configure("Subtitle.TLabel", font=FONTS["body"], background=p["bg"], foreground=p["muted"])
+    style.configure("DialogTitle.TLabel", font=(FONTS["title"][0], 15, "bold"), background=p["bg"],
+                    foreground=p["text"])
 
     # Cards
     # Tk tiles (doesn't stretch) the edges of an image element, so the corners must sit well inside
@@ -322,6 +324,92 @@ def _reset_labels(widget: tk.Misc) -> None:
             except tk.TclError:
                 pass
         _reset_labels(child)
+
+
+def scrim_supported() -> bool:
+    """A see-through overlay needs a compositor: always there on Windows and macOS, and in Linux desktop sessions."""
+    import os
+
+    if os.environ.get("LABSYNC_NO_SCRIM"):
+        return False
+    return sys.platform in ("win32", "darwin") or bool(os.environ.get("XDG_CURRENT_DESKTOP")
+                                                         or os.environ.get("LABSYNC_SCRIM"))
+
+
+class Scrim:
+    """Dims a window while a dialog is open over it, so it's obvious the dialog needs attention first.
+    Clicking the dimmed window brings the dialog back to the front."""
+
+    def __init__(self, master: tk.Misc, dialog: tk.Misc | None = None):
+        self.master = master.winfo_toplevel()
+        self.dialog = dialog
+        self.win: tk.Toplevel | None = None
+        if not scrim_supported() or not self.master.winfo_viewable():
+            return
+        try:
+            win = tk.Toplevel(self.master)
+            win.withdraw()
+            self.x11 = win.tk.call("tk", "windowingsystem") == "x11"
+            if self.x11:
+                # Under X the window manager owns stacking: a managed, undecorated layer that the dialog is
+                # transient for keeps the order master < dim layer < dialog
+                win.attributes("-type", "splash")
+            else:
+                win.overrideredirect(True)
+            win.configure(background="#000000", cursor="arrow")
+            win.attributes("-alpha", 0.38 if mode() == "light" else 0.6)
+            win.transient(self.master)
+            self.win = win
+            self._follow()
+            win.deiconify()
+            win.bind("<Button>", lambda e: self._focus_dialog())
+            self._bind = self.master.bind(
+                "<Configure>", lambda e: self._follow() if e.widget is self.master else None, add="+")
+        except tk.TclError:
+            self.win = None
+
+    def owner(self) -> tk.Misc:
+        """What the dialog should be transient for."""
+        return self.win if self.win is not None and self.x11 else self.master
+
+    def _follow(self) -> None:
+        if self.win is None:
+            return
+        m = self.master
+        self.win.geometry(f"{m.winfo_width()}x{m.winfo_height()}+{m.winfo_rootx()}+{m.winfo_rooty()}")
+        if self.dialog is not None:
+            self.keep_below(self.dialog)
+
+    def keep_below(self, dialog: tk.Misc) -> None:
+        """Stack the dim layer directly under the dialog."""
+        self.dialog = dialog
+        if self.win is None or self.x11:
+            return
+        try:
+            dialog.lift()
+        except tk.TclError:
+            pass
+
+    def _focus_dialog(self) -> None:
+        if self.dialog is not None:
+            try:
+                self.dialog.lift()
+                self.dialog.focus_force()
+                self.dialog.bell()
+            except tk.TclError:
+                pass
+
+    def close(self) -> None:
+        if self.win is not None:
+            try:
+                self.master.unbind("<Configure>", self._bind)
+            except tk.TclError:
+                pass
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+            self.win = None
 
 
 def window_chrome(window: tk.Misc) -> None:
